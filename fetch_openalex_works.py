@@ -17,6 +17,16 @@ OUTPUT_FILE = "openalex_works.json"
 
 BASE_URL = "https://api.openalex.org/works"
 
+# OpenAlex clusters raw author-name variants into one canonical Author ID
+# (A5043959168), and has incorrectly merged "MacCoss, M." from an unrelated
+# person - Malcolm MacCoss, a Merck medicinal chemist - into that ID. These
+# two crystal-structure deposits are his, not Michael J. MacCoss's, so they
+# are excluded here to keep them from reappearing on future refreshes.
+EXCLUDED_WORK_IDS = {
+    "https://openalex.org/W4397376998",  # CCDC 245444 (Malcolm MacCoss / Merck)
+    "https://openalex.org/W4397424873",  # CCDC 117932 (Malcolm MacCoss / Merck)
+}
+
 
 def fetch_all_works(orcid, mailto):
     works = []
@@ -54,6 +64,12 @@ def fetch_all_works(orcid, mailto):
 def main():
     print(f"Fetching all works for ORCID {ORCID}...")
     works = fetch_all_works(ORCID, MAILTO)
+
+    before = len(works)
+    works = [w for w in works if w.get("id") not in EXCLUDED_WORK_IDS]
+    excluded = before - len(works)
+    if excluded:
+        print(f"Excluded {excluded} misattributed work(s) (see EXCLUDED_WORK_IDS).")
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(works, f, indent=2)
