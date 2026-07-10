@@ -58,10 +58,12 @@ canvases except where noted; each panel has a fixed compact height.
 3. **Top 20 collaborators** — word cloud (themed HTML): each co-author's
    surname sized by number of shared papers, exact count printed after the
    name, full name on hover. Co-authors keyed by OpenAlex author ID (not name);
-   MacCoss himself excluded. Uses `--accent` at graduated opacity.
+   MacCoss himself excluded. Uses `--accent` at graduated opacity. Clicking a
+   name sets the table's Authors filter and jumps to it.
 4. **Top journals** — word cloud (same renderer as collaborators), each journal
    sized by number of papers published there. Non-journal sources (preprint
-   servers, data repositories like Figshare) are excluded.
+   servers, data repositories like Figshare) are excluded. Clicking a journal
+   sets the table's Journal filter and jumps to it.
 5. **Top 50 most-cited papers** — full-width bubble scatter. Each
    bubble is a top-50 paper positioned by publication year (x) and citations
    (y), sized by citations and coloured by its OpenAlex primary topic. The top
@@ -91,6 +93,9 @@ canvases except where noted; each panel has a fixed compact height.
 - Columns: **Title** (DOI link when present), **Year**, **Citations**,
   **Journal**, **Authors** (first + last only when >7 authors, expandable),
   **Type**.
+- A small **Clear filters** button in the panel header appears only when a
+  filter is active (text filters or a non-"all" Type selection) and resets them
+  all.
 
 ## Visual style
 Modern dashboard — cards, subtle shadows, rounded corners. Content centered in

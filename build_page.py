@@ -344,7 +344,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     align-items: baseline;
     gap: 3px;
     line-height: 1;
+    cursor: pointer;
   }
+  .collab-cloud .collab-item:hover .collab-name { text-decoration: underline; }
   .collab-cloud .collab-name { font-weight: 600; }
   .collab-cloud .collab-count { color: var(--text-muted); }
   .card h2 {
@@ -531,12 +533,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="card">
     <h2>Top 20 collaborators</h2>
     <div id="collabCloud" class="collab-cloud" style="height:280px"></div>
-    <div class="caption">Text size shows shared papers, with the count after each name.</div>
+    <div class="caption">Text size shows shared papers, with the count after each name. Click a name to filter the table.</div>
   </div>
   <div class="card">
     <h2>Top journals</h2>
     <div id="journalCloud" class="collab-cloud" style="height:280px"></div>
-    <div class="caption">Text size shows papers in each journal, preprints excluded.</div>
+    <div class="caption">Text size shows papers in each journal, preprints excluded. Click a journal to filter the table.</div>
   </div>
 </div>
 
@@ -562,7 +564,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="card">
-  <h2>Papers (<span id="rowCount"></span>)</h2>
+  <div class="card-head">
+    <h2>Papers (<span id="rowCount"></span>)</h2>
+    <button id="clearFilters" class="reset-zoom" hidden>Clear filters</button>
+  </div>
   <table>
     <thead>
       <tr>
@@ -722,9 +727,21 @@ function buildTopJournals(limit) {
     .slice(0, limit);
 }
 
+// Set a papers-table column filter and jump to the table. Reuses the existing
+// filter <input> (dispatching "input" runs the normal filter/render path).
+function applyColumnFilter(col, value) {
+  const input = document.querySelector(`input[data-filter="${col}"]`);
+  if (!input) return;
+  input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const card = document.getElementById("tableBody").closest(".card");
+  if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 // Generic word cloud: font size scales with count, exact count printed after
 // each label, theme accent colour at graduated opacity so it re-themes.
-// entries: [{ text, count, title }]; minF/maxF bound the label font size.
+// entries: [{ text, count, title, filter: { col, value } }]; clicking an item
+// applies that column filter to the table. minF/maxF bound the label font size.
 function renderWordCloud(hostId, entries, accent, minF, maxF) {
   const container = document.getElementById(hostId);
   container.innerHTML = "";
@@ -747,6 +764,7 @@ function renderWordCloud(hostId, entries, accent, minF, maxF) {
         `${escapeHtml(e.text)}</span>` +
       `<span class="collab-count" style="font-size:${Math.max(10, fontSize * 0.5).toFixed(0)}px;">` +
         `${e.count}</span>`;
+    if (e.filter) item.addEventListener("click", () => applyColumnFilter(e.filter.col, e.filter.value));
     container.appendChild(item);
   });
 }
@@ -755,7 +773,8 @@ function renderCollaborators(collab, accent) {
   renderWordCloud("collabCloud", collab.map(c => ({
     text: lastNameOf(c.name),
     count: c.count,
-    title: `${c.name}: ${c.count} shared paper${c.count === 1 ? "" : "s"}`,
+    title: `${c.name}: ${c.count} shared paper${c.count === 1 ? "" : "s"} — click to filter table`,
+    filter: { col: "authors", value: c.name },
   })), accent, 15, 48);
 }
 
@@ -763,7 +782,8 @@ function renderJournals(journals, accent) {
   renderWordCloud("journalCloud", journals.map(j => ({
     text: j.name,
     count: j.count,
-    title: `${j.name}: ${j.count} paper${j.count === 1 ? "" : "s"}`,
+    title: `${j.name}: ${j.count} paper${j.count === 1 ? "" : "s"} — click to filter table`,
+    filter: { col: "journal", value: j.name },
   })), accent, 12, 26);
 }
 
@@ -1071,6 +1091,30 @@ const state = {
   pageSize: 25,
 };
 
+let resetTypeFilter = () => {};   // set by initTypeFilter (re-checks all types)
+let totalTypeCount = 0;
+
+function hasActiveFilters() {
+  const f = state.filters;
+  if (f.title || f.year || f.citations || f.journal || f.authors) return true;
+  return !!(state.types && totalTypeCount && state.types.size !== totalTypeCount);
+}
+
+function updateClearBtn() {
+  const b = document.getElementById("clearFilters");
+  if (b) b.hidden = !hasActiveFilters();
+}
+
+function clearAllFilters() {
+  document.querySelectorAll("input[data-filter]").forEach(inp => {
+    inp.value = "";
+    state.filters[inp.getAttribute("data-filter")] = "";
+  });
+  resetTypeFilter();
+  state.page = 1;
+  renderTable();
+}
+
 function typeKeyOf(w) {
   return w.type || "(unspecified)";
 }
@@ -1172,7 +1216,11 @@ function renderTable() {
     const arrow = th.querySelector(".sort-arrow");
     arrow.textContent = state.sortCol === col ? (state.sortDir === "asc" ? "▲" : "▼") : "";
   });
+
+  updateClearBtn();
 }
+
+document.getElementById("clearFilters").addEventListener("click", clearAllFilters);
 
 document.querySelectorAll("th[data-col]").forEach(th => {
   th.addEventListener("click", () => {
@@ -1253,6 +1301,14 @@ function initTypeFilter() {
   }
   all.addEventListener("click", () => setAll(true));
   none.addEventListener("click", () => setAll(false));
+
+  // Expose "reset to all types" (without re-rendering) for the Clear filters button.
+  totalTypeCount = allTypes.length;
+  resetTypeFilter = () => {
+    state.types = new Set(allTypes);
+    boxes.forEach(cb => { cb.checked = true; });
+    updateSummary();
+  };
 
   // Dismiss the dropdown on an outside click or Escape (native <details> only
   // closes when its own summary is clicked again).
