@@ -51,9 +51,10 @@ canvases except where noted; each panel has a fixed compact height.
 1. **Publications per year** — single-series bar chart of papers per year,
    full year range.
 2. **Citations over time** — bars = citations received per year, line =
-   cumulative citations. Limited to OpenAlex's ~10-year `counts_by_year`
-   window (captioned), so a shorter x-axis than chart 1. The line is drawn
-   over the bars with a heavier stroke to stay visible.
+   cumulative citations. Covers only the years OpenAlex provides `counts_by_year`
+   for (currently from 2012), so a shorter x-axis than chart 1. The start year is
+   read from the data at build time and injected into the caption. The line is
+   drawn over the bars with a heavier stroke to stay visible.
 3. **Top 20 collaborators** — word cloud (themed HTML): each co-author's
    surname sized by number of shared papers, exact count printed after the
    name, full name on hover. Co-authors keyed by OpenAlex author ID (not name);
@@ -61,7 +62,7 @@ canvases except where noted; each panel has a fixed compact height.
 4. **Top journals** — word cloud (same renderer as collaborators), each journal
    sized by number of papers published there. Non-journal sources (preprint
    servers, data repositories like Figshare) are excluded.
-5. **Top 50 papers — impact over time** — full-width bubble scatter. Each
+5. **Top 50 most-cited papers** — full-width bubble scatter. Each
    bubble is a top-50 paper positioned by publication year (x) and citations
    (y), sized by citations and coloured by its OpenAlex primary topic. The top
    topics by citation weight get a colour + short label in a legend (short names
@@ -76,8 +77,8 @@ canvases except where noted; each panel has a fixed compact height.
    to pan, scroll to zoom, with a "Reset zoom" button. Topic colours are a fixed
    categorical palette; data is `compute_top_papers` in `build_page.py`.
 6. **Citation growth of top 10 most-cited papers** — full-width panel above the
-   table. One cumulative line per paper over the ~10-year window. Fixed
-   10-colour palette (legible on light and dark). Legend labels are
+   table. One cumulative line per paper over the same per-year window as chart 2.
+   Fixed 10-colour palette (legible on light and dark). Legend labels are
    `first-author-lastname (year)`.
 
 ## Papers table

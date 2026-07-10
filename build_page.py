@@ -149,9 +149,15 @@ def build():
     data_json = json.dumps(works, ensure_ascii=False)
     top_papers_json = json.dumps(compute_top_papers(raw_works), ensure_ascii=False)
 
+    # Earliest year OpenAlex provides per-year citation counts for (the window
+    # slides over time, so read it from the data rather than hard-coding it).
+    cite_years = [c["year"] for w in works for c in w["countsByYear"] if c["year"]]
+    cite_start_year = str(min(cite_years)) if cite_years else "recent years"
+
     html = (HTML_TEMPLATE
             .replace("__WORKS_DATA__", data_json)
-            .replace("__TOP_PAPERS_DATA__", top_papers_json))
+            .replace("__TOP_PAPERS_DATA__", top_papers_json)
+            .replace("__CITE_START_YEAR__", cite_start_year))
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html)
@@ -518,36 +524,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <h2>Citations over time</h2>
     <div class="chart-wrap" style="height:340px"><canvas id="citesChart"></canvas></div>
     <div class="caption">
-      OpenAlex only reports per-year citation counts for roughly the last
-      ~10 years for each paper, not full history back to publication date.
-      This chart is limited to the years OpenAlex actually provides data
-      for, so its range is shorter than the publications-per-year chart.
+      The chart starts at __CITE_START_YEAR__ since OpenAlex reports per-year
+      citations only from then on.
     </div>
   </div>
   <div class="card">
     <h2>Top 20 collaborators</h2>
     <div id="collabCloud" class="collab-cloud" style="height:280px"></div>
-    <div class="caption">Text size = number of shared papers; exact count shown after each name.</div>
+    <div class="caption">Text size shows shared papers, with the count after each name.</div>
   </div>
   <div class="card">
     <h2>Top journals</h2>
     <div id="journalCloud" class="collab-cloud" style="height:280px"></div>
-    <div class="caption">Text size = number of papers published there; preprint servers excluded.</div>
+    <div class="caption">Text size shows papers in each journal, preprints excluded.</div>
   </div>
 </div>
 
 <div class="card">
   <div class="card-head">
-    <h2>Top 50 papers — impact over time</h2>
+    <h2>Top 50 most-cited papers</h2>
     <button id="resetZoom" class="reset-zoom" hidden>Reset zoom</button>
   </div>
   <div id="topicLegend" class="topic-legend"></div>
   <div class="chart-wrap" style="height:380px"><canvas id="scatterChart"></canvas></div>
   <div class="caption">
-    Each bubble is a paper positioned by publication year and citation count,
-    sized by citations and coloured by its OpenAlex topic; the highest-cited
-    papers are labelled. Drag to zoom into a region, Shift+drag to pan, scroll
-    to zoom in/out; hover for details, click a bubble to open.
+    Bubble = a paper, by year and citations, coloured by OpenAlex topic. Drag to
+    zoom, Shift+drag to pan, scroll to zoom. Hover for details, click to open.
   </div>
 </div>
 
@@ -555,8 +557,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <h2>Citation growth of top 10 most-cited papers</h2>
   <div class="chart-wrap" style="height:320px"><canvas id="topPapersChart"></canvas></div>
   <div class="caption">
-    Cumulative citations per year for each paper, using OpenAlex's ~10-year
-    per-year citation window.
+    Cumulative citations per year, from __CITE_START_YEAR__ on.
   </div>
 </div>
 
