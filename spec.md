@@ -57,27 +57,25 @@ canvases except where noted; each panel has a fixed compact height.
    name, full name on hover. Co-authors keyed by OpenAlex author ID (not name);
    MacCoss himself excluded. Uses `--accent` at graduated opacity.
 4. **Top journals** — word cloud (same renderer as collaborators), each journal
-   sized by number of papers published there. Preprint servers and data
-   repositories (bioRxiv, arXiv, Figshare, …) are excluded.
-5. **Top 50 papers, by research community** — full-width constellation (SVG,
-   built at render time), above the citation-growth panel. Each star is one of
-   the 50 most-cited papers, sized by citations, on a fixed dark "sky"
-   background (so it reads on light themes too); brightest stars are drawn last
-   so the top papers stay visible. Papers are grouped into co-author communities
-   and linked with faint lines:
-   - Community detection: over the top 50, build a shared-co-author graph where
-     each shared author is weighted `1 / (papers they appear on in the top 50)`
-     — this down-weights lab-wide hub authors (Merrihew, MacLean) so specialist
-     collaborators drive the grouping. Papers are linked (and unioned into one
-     community) when their summed weight clears a threshold (0.5). Computed in
-     `build_page.py`; positions come from a small deterministic force-directed
-     layout (with citation-weighted repulsion so big stars spread apart), also
-     in `build_page.py`.
-   - The largest few communities are coloured and labelled by the OpenAlex
-     topic carrying the most citation weight in them; smaller/singleton
-     communities are grey ("Other"). Labels for small mixed communities are
-     approximate (they reflect the community's citation-weighted OpenAlex
-     topic). Hover shows title + citations + topic; click opens the DOI.
+   sized by number of papers published there. Non-journal sources (preprint
+   servers, data repositories like Figshare) are excluded.
+5. **Top 50 papers, by research community** — full-width constellation (SVG),
+   above the citation-growth panel. Each star is one of the 50 most-cited
+   papers, sized by citations, on a fixed dark "sky" (so it reads on light
+   themes too); brightest stars are drawn last and their glow is
+   non-interactive, so the top papers stay visible and hover hits the right
+   star. Papers are grouped into co-author communities, linked with faint lines,
+   and coloured + labelled by each community's dominant OpenAlex topic; small
+   communities are grey ("Other"). Hover shows title + citations + topic; click
+   opens the DOI. All computed in `build_page.py`:
+   - Grouping: a shared-co-author graph where each shared author is weighted
+     `1 / (papers they appear on in the top 50)` — down-weighting lab-wide hub
+     authors (Merrihew, MacLean) so specialist collaborators drive the grouping;
+     papers are unioned into a community when their summed weight clears 0.5.
+   - Layout: a small deterministic force-directed layout with citation-weighted
+     repulsion so the biggest stars spread apart.
+   - Labels for small mixed communities are approximate (the community's
+     citation-weighted OpenAlex topic).
 6. **Citation growth of top 10 most-cited papers** — full-width panel above the
    table. One cumulative line per paper over the ~10-year window. Fixed
    10-colour palette (legible on light and dark). Legend labels are
