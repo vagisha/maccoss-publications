@@ -17,7 +17,9 @@ growth. Data comes from OpenAlex (ORCID `0000-0003-1853-0256`), fetched by
   their published journal. The raw `openalex_works.json` still contains them;
   the filter is applied at build time so every panel and the totals are
   consistent.
-- Chart.js loads from a CDN (needs internet for charts; table works offline).
+- Chart.js, `chartjs-plugin-zoom`, and Hammer.js (which the zoom plugin needs
+  for drag-to-pan gestures) load from a CDN (needs internet for charts; the
+  table works offline).
 
 ## Header
 - Title: **Michael J. MacCoss**. Affiliation: University of Washington,
@@ -59,23 +61,20 @@ canvases except where noted; each panel has a fixed compact height.
 4. **Top journals** — word cloud (same renderer as collaborators), each journal
    sized by number of papers published there. Non-journal sources (preprint
    servers, data repositories like Figshare) are excluded.
-5. **Top 50 papers, by research community** — full-width constellation (SVG),
-   above the citation-growth panel. Each star is one of the 50 most-cited
-   papers, sized by citations, on a fixed dark "sky" (so it reads on light
-   themes too); brightest stars are drawn last and their glow is
-   non-interactive, so the top papers stay visible and hover hits the right
-   star. Papers are grouped into co-author communities, linked with faint lines,
-   and coloured + labelled by each community's dominant OpenAlex topic; small
-   communities are grey ("Other"). Hover shows title + citations + topic; click
-   opens the DOI. All computed in `build_page.py`:
-   - Grouping: a shared-co-author graph where each shared author is weighted
-     `1 / (papers they appear on in the top 50)` — down-weighting lab-wide hub
-     authors (Merrihew, MacLean) so specialist collaborators drive the grouping;
-     papers are unioned into a community when their summed weight clears 0.5.
-   - Layout: a small deterministic force-directed layout with citation-weighted
-     repulsion so the biggest stars spread apart.
-   - Labels for small mixed communities are approximate (the community's
-     citation-weighted OpenAlex topic).
+5. **Top 50 papers — impact over time** — full-width bubble scatter. Each
+   bubble is a top-50 paper positioned by publication year (x) and citations
+   (y), sized by citations and coloured by its OpenAlex primary topic. The top
+   topics by citation weight get a colour + short label in a legend (short names
+   from a hand-written `TOPIC_SHORT` map; unmapped topics use their full OpenAlex
+   name); the rest are grey "Other". Papers are labelled on the plot as
+   `first-author-lastname, year` — candidates are those currently in view, ranked
+   by citations, with a label budget that grows as you zoom in, so zooming a
+   region labels more of its papers than just the global top-10 (highest-cited
+   placed first, any that can't fit without overlap are skipped). Hover shows
+   author, year, citations and the title (first 50 chars); click opens the DOI.
+   Zoomable/pannable via `chartjs-plugin-zoom`: drag to zoom a region, Shift+drag
+   to pan, scroll to zoom, with a "Reset zoom" button. Topic colours are a fixed
+   categorical palette; data is `compute_top_papers` in `build_page.py`.
 6. **Citation growth of top 10 most-cited papers** — full-width panel above the
    table. One cumulative line per paper over the ~10-year window. Fixed
    10-colour palette (legible on light and dark). Legend labels are

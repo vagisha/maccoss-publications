@@ -1,2 +1,5 @@
 # Local Claude Code tooling config (preview server, permissions) — not part of the project
 .claude/
+
+# Python bytecode cache
+__pycache__/

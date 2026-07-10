@@ -11,10 +11,8 @@ Usage:
 """
 
 import json
-import math
-import random
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 
 SOURCE_FILE = "openalex_works.json"
 OUTPUT_FILE = "index.html"
@@ -33,181 +31,73 @@ def is_preprint(w):
     src = (w.get("primary_location") or {}).get("source") or {}
     return bool(PREPRINT_SOURCE.search(src.get("display_name") or ""))
 
-# ---- constellation (top-N papers grouped into co-author communities) ----
-CONSTELLATION_TOP_N = 50
-# Edge threshold on the hub-down-weighted shared-co-author score. Two papers
-# are linked when they share co-authors whose summed 1/(papers-they-appear-on)
-# weight clears this bar, so ubiquitous "hub" authors (who are on many papers)
-# contribute little and specialist collaborators drive the grouping.
-CONSTELLATION_EDGE_THRESHOLD = 0.5
-CONSTELLATION_MAX_NAMED = 6  # colour+label this many communities; rest are "Other"
-# Distinct star colours for the named communities (bright on a dark sky).
-CONSTELLATION_COLORS = [
-    "#8ab4f8", "#5eead4", "#fcd34d", "#c4b5fd", "#fda4af", "#86efac",
+# ---- top papers scatter (citations vs. year, coloured by OpenAlex topic) ----
+TOP_PAPERS_N = 50
+TOP_PAPERS_MAX_TOPICS = 6   # colour+label this many topics; rest are "Other"
+# Categorical palette (saturated mid-tones that stay legible on both the light
+# and dark theme card backgrounds).
+TOPIC_COLORS = [
+    "#2a78d6", "#1baf7a", "#eda100", "#7c5cd6", "#e34948", "#2f9e44",
 ]
-CONSTELLATION_OTHER_COLOR = "#8b93a7"
-
-
-def _coauthor_ids(w):
-    ids = set()
-    for a in w.get("authorships") or []:
-        au = a.get("author") or {}
-        aid = au.get("id")
-        if aid and aid != MACCOSS_ID:
-            ids.add(aid)
-    return ids
+TOPIC_OTHER_COLOR = "#8a8f98"
+# Short display names for the (long) OpenAlex topic labels; unknown topics fall
+# back to their full OpenAlex name.
+TOPIC_SHORT = {
+    "Advanced Proteomics Techniques and Applications": "Proteomics methods",
+    "Genetics, Aging, and Longevity in Model Organisms": "Genetics & aging",
+    "Bacterial biofilms and quorum sensing": "Microbiology",
+    "Genomics and Chromatin Dynamics": "Genomics",
+    "Ubiquitin and proteasome pathways": "Ubiquitin/proteasome",
+    "Metabolomics and Mass Spectrometry Studies": "Metabolomics",
+    "Mass Spectrometry Techniques and Applications": "Mass spectrometry",
+}
 
 
 def _topic_of(w):
     return (w.get("primary_topic") or {}).get("display_name") or "Uncategorized"
 
 
-def _shorten(label, n=30):
-    return label if len(label) <= n else label[: n - 1].rstrip() + "…"
+def _first_author(w):
+    for a in w.get("authorships") or []:
+        name = (a.get("author") or {}).get("display_name") or a.get("raw_author_name")
+        if name:
+            return name
+    return "Unknown"
 
 
-def _force_layout(n, edges, weight=None, iters=420, seed=42):
-    """Small deterministic Fruchterman-Reingold layout with gravity, returning
-    positions normalised into [0, 1]. Disconnected papers drift to the edges;
-    densely linked communities clump together. `weight` (0..1 per node, e.g.
-    scaled citations) boosts repulsion so the biggest stars spread apart and
-    stay individually visible instead of merging into a blob."""
-    rng = random.Random(seed)
-    pos = [[rng.uniform(0, 1), rng.uniform(0, 1)] for _ in range(n)]
-    if n <= 1:
-        return [[0.5, 0.5]] * n
-    if weight is None:
-        weight = [0.0] * n
-    k = 1.5 / math.sqrt(n)
-    temp = 0.12
-    for _ in range(iters):
-        disp = [[0.0, 0.0] for _ in range(n)]
-        for i in range(n):
-            for j in range(i + 1, n):
-                dx = pos[i][0] - pos[j][0]
-                dy = pos[i][1] - pos[j][1]
-                d = math.sqrt(dx * dx + dy * dy) + 1e-6
-                f = (k * k) / d * (1 + 1.8 * (weight[i] + weight[j]))
-                ux, uy = dx / d, dy / d
-                disp[i][0] += ux * f
-                disp[i][1] += uy * f
-                disp[j][0] -= ux * f
-                disp[j][1] -= uy * f
-        for a, b in edges:
-            dx = pos[a][0] - pos[b][0]
-            dy = pos[a][1] - pos[b][1]
-            d = math.sqrt(dx * dx + dy * dy) + 1e-6
-            f = (d * d) / k
-            ux, uy = dx / d, dy / d
-            disp[a][0] -= ux * f
-            disp[a][1] -= uy * f
-            disp[b][0] += ux * f
-            disp[b][1] += uy * f
-        for i in range(n):
-            disp[i][0] += (0.5 - pos[i][0]) * 0.06
-            disp[i][1] += (0.5 - pos[i][1]) * 0.06
-        for i in range(n):
-            dx, dy = disp[i]
-            dl = math.sqrt(dx * dx + dy * dy) + 1e-9
-            step = min(dl, temp)
-            pos[i][0] += dx / dl * step
-            pos[i][1] += dy / dl * step
-        temp = max(0.008, temp * 0.985)
-
-    xs = [p[0] for p in pos]
-    ys = [p[1] for p in pos]
-    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
-    pad = 0.07
-    for p in pos:
-        p[0] = pad + (1 - 2 * pad) * (p[0] - minx) / (maxx - minx + 1e-9)
-        p[1] = pad + (1 - 2 * pad) * (p[1] - miny) / (maxy - miny + 1e-9)
-    return pos
-
-
-def compute_constellation(raw_works):
-    """Top-N cited papers as stars, grouped into co-author communities and
-    labelled by the OpenAlex topic carrying the most citation weight."""
+def compute_top_papers(raw_works):
+    """The top-N cited papers for the scatter chart: publication year vs.
+    citation count, coloured by OpenAlex primary topic. The top few topics by
+    total citation weight get a colour + short label; the rest are "Other"."""
     top = sorted(raw_works, key=lambda w: w.get("cited_by_count", 0), reverse=True)
-    top = top[:CONSTELLATION_TOP_N]
-    n = len(top)
-    ca = [_coauthor_ids(w) for w in top]
+    top = [w for w in top[:TOP_PAPERS_N] if w.get("publication_year")]
 
-    author_count = Counter()
-    for s in ca:
-        for a in s:
-            author_count[a] += 1
+    topic_weight = Counter()
+    for w in top:
+        topic_weight[_topic_of(w)] += w.get("cited_by_count", 0)
+    named = [t for t, _ in topic_weight.most_common(TOP_PAPERS_MAX_TOPICS)]
+    topic_color = {t: TOPIC_COLORS[k % len(TOPIC_COLORS)] for k, t in enumerate(named)}
 
-    # Hub-down-weighted shared-co-author graph -> union-find components.
-    parent = list(range(n))
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    edges = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            shared = ca[i] & ca[j]
-            if not shared:
-                continue
-            score = sum(1.0 / author_count[a] for a in shared)
-            if score >= CONSTELLATION_EDGE_THRESHOLD:
-                edges.append((i, j))
-                ri, rj = find(i), find(j)
-                if ri != rj:
-                    parent[max(ri, rj)] = min(ri, rj)
-
-    members = defaultdict(list)
-    for i in range(n):
-        members[find(i)].append(i)
-
-    # Rank communities by size, then total citations; name the top few.
-    def comm_cites(idxs):
-        return sum(top[i].get("cited_by_count", 0) for i in idxs)
-
-    ranked = sorted(members.values(), key=lambda idxs: (len(idxs), comm_cites(idxs)), reverse=True)
-    named = [c for c in ranked if len(c) >= 2][:CONSTELLATION_MAX_NAMED]
-
-    comm_id = [-1] * n          # -1 == "Other"
-    comm_color = [CONSTELLATION_OTHER_COLOR] * n
-    legend = []
-    for ci, idxs in enumerate(named):
-        color = CONSTELLATION_COLORS[ci % len(CONSTELLATION_COLORS)]
-        weight = Counter()
-        for i in idxs:
-            weight[_topic_of(top[i])] += top[i].get("cited_by_count", 0)
-        label = weight.most_common(1)[0][0]
-        brightest = max(idxs, key=lambda i: top[i].get("cited_by_count", 0))
-        for i in idxs:
-            comm_id[i] = ci
-            comm_color[i] = color
-        legend.append({"label": label, "short": _shorten(label, 42), "color": color,
-                       "anchor": brightest})
-
-    max_c = max((top[i].get("cited_by_count", 0) for i in range(n)), default=1) or 1
-    weight = [math.sqrt(top[i].get("cited_by_count", 0) / max_c) for i in range(n)]
-    pos = _force_layout(n, edges, weight=weight, seed=42)
+    def short(t):
+        return TOPIC_SHORT.get(t, t)
 
     nodes = []
-    for i, w in enumerate(top):
+    for w in top:
+        topic = _topic_of(w)
         nodes.append({
             "title": w.get("display_name") or w.get("title"),
+            "firstAuthor": _first_author(w),
             "year": w.get("publication_year"),
             "citations": w.get("cited_by_count", 0),
             "doi": w.get("doi"),
-            "topic": _topic_of(w),
-            "comm": comm_id[i],
-            "color": comm_color[i],
-            "x": round(pos[i][0], 4),
-            "y": round(pos[i][1], 4),
-            "isAnchor": any(lg["anchor"] == i for lg in legend),
+            "topic": topic,
+            "topicShort": short(topic) if topic in topic_color else "Other",
+            "color": topic_color.get(topic, TOPIC_OTHER_COLOR),
         })
-    for lg in legend:
-        lg.pop("anchor", None)
 
-    return {"nodes": nodes, "edges": edges, "legend": legend}
+    legend = [{"label": short(t), "color": topic_color[t]} for t in named]
+    legend.append({"label": "Other", "color": TOPIC_OTHER_COLOR})
+    return {"nodes": nodes, "legend": legend}
 
 
 def reduce_work(w):
@@ -257,11 +147,11 @@ def build():
     works = [w for w in works if w["year"] is not None]
 
     data_json = json.dumps(works, ensure_ascii=False)
-    constellation_json = json.dumps(compute_constellation(raw_works), ensure_ascii=False)
+    top_papers_json = json.dumps(compute_top_papers(raw_works), ensure_ascii=False)
 
     html = (HTML_TEMPLATE
             .replace("__WORKS_DATA__", data_json)
-            .replace("__CONSTELLATION_DATA__", constellation_json))
+            .replace("__TOP_PAPERS_DATA__", top_papers_json))
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html)
@@ -277,6 +167,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <title>Michael J. MacCoss</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <style>
   :root {
     /* Surface + text defaults (light themes inherit these; dark themes override). */
@@ -405,16 +297,34 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     position: relative;
     width: 100%;
   }
-  .constellation-wrap {
-    position: relative;
-    width: 100%;
-    background: #0a0f1e;
-    border-radius: 8px;
-    overflow: hidden;
+  .card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
   }
-  .constellation-wrap svg { display: block; width: 100%; height: 100%; }
-  .constellation-wrap .star { cursor: pointer; }
-  .constellation-wrap text { font-family: -apple-system, "Segoe UI", sans-serif; }
+  .card-head h2 { margin: 0; }
+  .reset-zoom {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--card);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .reset-zoom:hover { background: var(--accent-soft); }
+  .topic-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin-bottom: 10px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .topic-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .topic-legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
   .collab-cloud {
     display: flex;
     flex-wrap: wrap;
@@ -627,12 +537,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="card">
-  <h2>Top 50 papers, by research community</h2>
-  <div id="constellation" class="constellation-wrap" style="height:360px"></div>
+  <div class="card-head">
+    <h2>Top 50 papers — impact over time</h2>
+    <button id="resetZoom" class="reset-zoom" hidden>Reset zoom</button>
+  </div>
+  <div id="topicLegend" class="topic-legend"></div>
+  <div class="chart-wrap" style="height:380px"><canvas id="scatterChart"></canvas></div>
   <div class="caption">
-    Each star is a paper (size = citations); papers sharing co-authors form
-    constellations, coloured and named by their dominant OpenAlex topic.
-    Hover for details, click to open.
+    Each bubble is a paper positioned by publication year and citation count,
+    sized by citations and coloured by its OpenAlex topic; the highest-cited
+    papers are labelled. Drag to zoom into a region, Shift+drag to pan, scroll
+    to zoom in/out; hover for details, click a bubble to open.
   </div>
 </div>
 
@@ -684,7 +599,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <script>
 const WORKS = __WORKS_DATA__;
-const CONSTELLATION = __CONSTELLATION_DATA__;
+const TOP_PAPERS = __TOP_PAPERS_DATA__;
 
 // ---------- stat tiles ----------
 function computeHIndex(citCounts) {
@@ -726,7 +641,7 @@ function escapeHtml(s) {
 }
 
 // ---------- charts ----------
-let pubsChart, citesChart, topPapersChart;
+let pubsChart, citesChart, topPapersChart, scatterChart;
 
 // Fixed 10-colour categorical palette for the top-10-papers lines. Chosen as
 // mid-tone, saturated hues that stay legible on both the light and dark theme
@@ -894,6 +809,7 @@ function renderCharts() {
   if (pubsChart) pubsChart.destroy();
   if (citesChart) citesChart.destroy();
   if (topPapersChart) topPapersChart.destroy();
+  if (scatterChart) scatterChart.destroy();
 
   // Canvas can't read CSS variables, so drive Chart.js text/grid colours from
   // the resolved theme values (keeps axes/legends legible on dark themes).
@@ -978,7 +894,171 @@ function renderCharts() {
       },
     },
   });
+
+  renderScatter(text, textMuted, grid);
 }
+
+// ---------- top-papers scatter: year vs citations, coloured by topic ----------
+function renderTopicLegend() {
+  const host = document.getElementById("topicLegend");
+  host.innerHTML = "";
+  TOP_PAPERS.legend.forEach(l => {
+    const s = document.createElement("span");
+    s.innerHTML = `<span class="sw" style="background:${l.color}"></span>${escapeHtml(l.label)}`;
+    host.appendChild(s);
+  });
+}
+
+function renderScatter(text, textMuted, grid) {
+  renderTopicLegend();
+  document.getElementById("resetZoom").hidden = true;   // fresh chart starts unzoomed
+  const nodes = TOP_PAPERS.nodes;
+  const maxC = Math.max(...nodes.map(n => n.citations), 1);
+  const years = nodes.map(n => n.year);
+  const minYr = Math.min(...years) - 1, maxYr = Math.max(...years) + 1;
+
+  // One dataset per legend entry so the built-in legend toggles by topic.
+  const byLabel = {};
+  TOP_PAPERS.legend.forEach(l => { byLabel[l.label] = { label: l.label, color: l.color, data: [] }; });
+  nodes.forEach((n, i) => {
+    const key = byLabel[n.topicShort] ? n.topicShort : "Other";
+    byLabel[key].data.push({ x: n.year, y: n.citations, r: 4 + Math.sqrt(n.citations / maxC) * 15, i });
+  });
+  const datasets = Object.values(byLabel).map(d => ({
+    label: d.label, data: d.data,
+    backgroundColor: d.color + "cc", borderColor: d.color, borderWidth: 1,
+    hoverBackgroundColor: d.color,
+  }));
+
+  const cardColor = getComputedStyle(document.documentElement).getPropertyValue("--card").trim() || "#fff";
+  const labelPlugin = {
+    id: "pointLabels",
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart;
+      ctx.save();
+      ctx.font = "600 11px -apple-system, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+
+      // Candidates = every point currently inside the plot area, ranked by
+      // citations. The label budget grows as you zoom in (smaller visible year
+      // range → more room), so more papers get labelled the further you zoom.
+      const area = chart.chartArea;
+      const xs = chart.scales.x;
+      const zoomF = Math.max(1, (maxYr - minYr) / Math.max(0.001, xs.max - xs.min));
+      const budget = Math.min(30, Math.round(10 * Math.sqrt(zoomF)));
+
+      const cands = [];
+      chart.data.datasets.forEach((ds, di) => {
+        const meta = chart.getDatasetMeta(di);
+        ds.data.forEach((pt, pi) => {
+          const el = meta.data[pi];
+          if (!el) return;
+          if (el.x < area.left || el.x > area.right || el.y < area.top || el.y > area.bottom) return;
+          const n = nodes[pt.i];
+          cands.push({ x: el.x + el.options.radius + 4, y: el.y,
+            text: `${lastNameOf(n.firstAuthor)}, ${n.year}`, cites: n.citations });
+        });
+      });
+      cands.sort((a, b) => b.cites - a.cites);
+
+      // Place highest-cited first; try the point's own line then a couple of
+      // small nudges, and skip a label entirely if it can't fit without overlap.
+      const placed = [];
+      for (const it of cands) {
+        if (placed.length >= budget) break;
+        const w = ctx.measureText(it.text).width;
+        let chosen = null;
+        for (const dy of [0, 14, -14, 28, -28]) {
+          const y = it.y + dy;
+          if (y < area.top + 6 || y > area.bottom - 6) continue;
+          let ok = true;
+          for (const q of placed) {
+            if (Math.abs(y - q.y) < 14 && it.x < q.x + q.w + 12 && q.x < it.x + w + 12) { ok = false; break; }
+          }
+          if (ok) { chosen = y; break; }
+        }
+        if (chosen === null) continue;
+        placed.push({ x: it.x, y: chosen, w });
+        ctx.strokeStyle = cardColor;
+        ctx.strokeText(it.text, it.x, chosen);
+        ctx.fillStyle = text;
+        ctx.fillText(it.text, it.x, chosen);
+      }
+      ctx.restore();
+    },
+  };
+
+  scatterChart = new Chart(document.getElementById("scatterChart"), {
+    type: "bubble",
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { right: 70, top: 10 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (c) => {
+              const n = nodes[c.raw.i];
+              return `${lastNameOf(n.firstAuthor)}, ${n.year} — ${n.citations.toLocaleString()} citations`;
+            },
+            // second line: the paper title, truncated to 50 characters
+            afterLabel: (c) => {
+              const t = nodes[c.raw.i].title || "";
+              return t.length > 50 ? t.slice(0, 49).trimEnd() + "…" : t;
+            },
+          },
+        },
+        zoom: {
+          pan: { enabled: true, mode: "xy", modifierKey: "shift", onPanComplete: showResetBtn },
+          zoom: {
+            wheel: { enabled: true, speed: 0.2 },
+            drag: { enabled: true, backgroundColor: "rgba(90,120,200,0.15)",
+                    borderColor: "rgba(90,120,200,0.6)", borderWidth: 1 },
+            mode: "xy",
+            onZoomComplete: showResetBtn,
+          },
+          // Limits are padded a little beyond the data so the data boundary
+          // itself never clamps a wheel gesture (which would stall zoom-out);
+          // they only stop runaway zoom-out / pan drift.
+          limits: {
+            x: { min: minYr - 4, max: maxYr + 4 },
+            y: { min: -maxC * 0.06, max: maxC * 1.15 },
+          },
+        },
+      },
+      scales: {
+        x: { min: minYr, max: maxYr, title: { display: true, text: "Publication year", color: textMuted },
+             ticks: { color: textMuted, precision: 0 }, grid: { color: grid } },
+        y: { beginAtZero: true, title: { display: true, text: "Citations", color: textMuted },
+             ticks: { color: textMuted }, grid: { color: grid } },
+      },
+      onClick: (e, els) => {
+        if (!els.length) return;
+        const pt = scatterChart.data.datasets[els[0].datasetIndex].data[els[0].index];
+        const doi = nodes[pt.i].doi;
+        if (doi) window.open(doi, "_blank", "noopener");
+      },
+    },
+    plugins: [labelPlugin],
+  });
+}
+
+// Show the reset button only while the chart is actually zoomed or panned.
+function showResetBtn() {
+  const b = document.getElementById("resetZoom");
+  if (!b || !scatterChart) return;
+  b.hidden = scatterChart.isZoomedOrPanned ? !scatterChart.isZoomedOrPanned() : false;
+}
+
+document.getElementById("resetZoom").addEventListener("click", () => {
+  if (scatterChart && scatterChart.resetZoom) scatterChart.resetZoom();
+  document.getElementById("resetZoom").hidden = true;
+});
 
 // ---------- table: filter, sort, paginate ----------
 const state = {
@@ -1193,81 +1273,6 @@ document.getElementById("nextPage").addEventListener("click", () => {
   state.page++; renderTable();
 });
 
-// ---------- constellation ----------
-function renderConstellation() {
-  const host = document.getElementById("constellation");
-  const W = host.clientWidth || 560;
-  const H = host.clientHeight || 280;
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-
-  const nodes = CONSTELLATION.nodes;
-  const edges = CONSTELLATION.edges;
-  const maxC = Math.max(...nodes.map(n => n.citations), 1);
-  const px = n => 12 + n.x * (W - 24);
-  const py = n => 12 + n.y * (H - 24);
-  const rOf = c => 2.4 + Math.sqrt(c / maxC) * 15;
-
-  const mk = (tag, attrs) => {
-    const e = document.createElementNS(NS, tag);
-    for (const k in attrs) e.setAttribute(k, attrs[k]);
-    return e;
-  };
-
-  // faint background field stars (deterministic scatter)
-  let seed = 7;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-  for (let i = 0; i < 70; i++) {
-    svg.appendChild(mk("circle", { cx: rnd() * W, cy: rnd() * H, r: 0.4 + rnd() * 1.0,
-      fill: "#ffffff", opacity: (0.04 + rnd() * 0.16).toFixed(2) }));
-  }
-
-  // constellation lines (within communities)
-  edges.forEach(([a, b]) => {
-    const na = nodes[a], nb = nodes[b];
-    const col = na.comm >= 0 && na.comm === nb.comm ? na.color : "#8b93a7";
-    svg.appendChild(mk("line", { x1: px(na), y1: py(na), x2: px(nb), y2: py(nb),
-      stroke: col, "stroke-width": 0.6, opacity: 0.22 }));
-  });
-
-  // stars — draw faintest first so the most-cited papers sit on top
-  [...nodes].sort((a, b) => a.citations - b.citations).forEach(n => {
-    const r = rOf(n.citations);
-    const g = mk("g", { class: "star" });
-    // Glow halos are non-interactive so a bright star's halo doesn't steal
-    // hover/click from a neighbouring star underneath it — only the solid core
-    // is the hit target.
-    g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r * 1.9, fill: n.color, opacity: 0.08, "pointer-events": "none" }));
-    g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r * 1.25, fill: n.color, opacity: 0.18, "pointer-events": "none" }));
-    g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r, fill: n.color, stroke: "#0a0f1e", "stroke-width": 0.6 }));
-    if (r > 6) g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r * 0.4, fill: "#ffffff", opacity: 0.9, "pointer-events": "none" }));
-    const title = document.createElementNS(NS, "title");
-    title.textContent = `${n.title} — ${n.citations.toLocaleString()} citations · ${n.topic}`;
-    g.appendChild(title);
-    if (n.doi) g.addEventListener("click", () => window.open(n.doi, "_blank", "noopener"));
-    svg.appendChild(g);
-  });
-
-  // one topic label per named community, at its brightest star
-  CONSTELLATION.legend.forEach(lg => {
-    const anchor = nodes.find(n => n.isAnchor && n.color === lg.color);
-    if (!anchor) return;
-    const r = rOf(anchor.citations);
-    const right = anchor.x < 0.72;
-    const t = mk("text", {
-      x: right ? px(anchor) + r + 5 : px(anchor) - r - 5,
-      y: py(anchor) + 3.5, "font-size": 11, "font-weight": 600,
-      fill: lg.color, "text-anchor": right ? "start" : "end",
-    });
-    t.textContent = lg.short;
-    svg.appendChild(t);
-  });
-
-  host.innerHTML = "";
-  host.appendChild(svg);
-}
-
 // ---------- theme ----------
 document.getElementById("themeSelect").addEventListener("change", (e) => {
   document.documentElement.setAttribute("data-theme", e.target.value);
@@ -1277,10 +1282,8 @@ document.getElementById("themeSelect").addEventListener("change", (e) => {
 // ---------- init ----------
 renderTiles();
 renderCharts();
-renderConstellation();
 initTypeFilter();
 renderTable();
-window.addEventListener("resize", renderConstellation);
 </script>
 
 </body>
