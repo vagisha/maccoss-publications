@@ -45,8 +45,10 @@ Three tiles: **Total papers**, **Total citations**, **h-index** (h-index
 computed client-side from each paper's citation count).
 
 ## Charts
-A 2×2 grid of panels, then two full-width panels above the table. Chart.js
-canvases except where noted; each panel has a fixed compact height.
+Two 2-column rows and two full-width panels, in order: a Publications/Citations
+row, the top-50 scatter (full width), a Collaborators/Journals row, then
+citation growth (full width) above the table. Chart.js canvases except where
+noted; each panel has a fixed compact height.
 
 1. **Publications per year** — single-series bar chart of papers per year,
    full year range.
@@ -55,16 +57,7 @@ canvases except where noted; each panel has a fixed compact height.
    for (currently from 2012), so a shorter x-axis than chart 1. The start year is
    read from the data at build time and injected into the caption. The line is
    drawn over the bars with a heavier stroke to stay visible.
-3. **Top 20 collaborators** — word cloud (themed HTML): each co-author's
-   surname sized by number of shared papers, exact count printed after the
-   name, full name on hover. Co-authors keyed by OpenAlex author ID (not name);
-   MacCoss himself excluded. Uses `--accent` at graduated opacity. Clicking a
-   name sets the table's Authors filter and jumps to it.
-4. **Top journals** — word cloud (same renderer as collaborators), each journal
-   sized by number of papers published there. Non-journal sources (preprint
-   servers, data repositories like Figshare) are excluded. Clicking a journal
-   sets the table's Journal filter and jumps to it.
-5. **Top 50 most-cited papers** — full-width bubble scatter. Each
+3. **Top 50 most-cited papers** — full-width bubble scatter. Each
    bubble is a top-50 paper positioned by publication year (x) and citations
    (y), sized by citations and coloured by its OpenAlex primary topic. The top
    topics by citation weight get a colour + short label in a legend (short names
@@ -76,12 +69,34 @@ canvases except where noted; each panel has a fixed compact height.
    placed first, any that can't fit without overlap are skipped). Hover shows
    author, year, citations and the title (first 50 chars); click opens the DOI.
    Zoomable/pannable via `chartjs-plugin-zoom`: drag to zoom a region, Shift+drag
-   to pan, scroll to zoom, with a "Reset zoom" button. Topic colours are a fixed
-   categorical palette; data is `compute_top_papers` in `build_page.py`.
-6. **Citation growth of top 10 most-cited papers** — full-width panel above the
-   table. One cumulative line per paper over the same per-year window as chart 2.
-   Fixed 10-colour palette (legible on light and dark). Legend labels are
-   `first-author-lastname (year)`.
+   to pan (scroll-wheel zoom is disabled), with a "Reset zoom" button. In the
+   topic legend, hovering an item highlights that topic's bubbles and dims the
+   rest, and clicking it hides/shows (crosses out) that topic's series. Topic
+   colours are a fixed categorical palette; data is `compute_top_papers` in
+   `build_page.py`.
+4. **Top 20 collaborators** — word cloud (themed HTML): each co-author's
+   surname sized by number of shared papers, exact count printed after the
+   name, full name on hover. Co-authors keyed by OpenAlex author ID (not name);
+   MacCoss himself excluded. Uses `--accent` at graduated opacity. Clicking a
+   name sets the table's Authors filter and jumps to it.
+5. **Top journals** — word cloud (same renderer as collaborators), each journal
+   sized by number of papers published there. Non-journal sources (preprint
+   servers, data repositories like Figshare) are excluded. Clicking a journal
+   sets the table's Journal filter and jumps to it.
+6. **Citation growth** — full-width panel above the table. One cumulative line
+   per paper over the same per-year window as chart 2, fixed 10-colour palette
+   (legible on light and dark), legend labels `first-author-lastname (year)`.
+   Each line starts at the paper's publication year (values before it are null,
+   not zero) rather than all flat-lining from the data's start year. The
+   built-in legend supports click-to-hide (Chart.js default) and hover-to-emphasise.
+   Shows the **top 10 most-cited papers by default**, but if any table rows are
+   selected it switches to those papers — the title becomes "Citation growth of
+   selected papers (N)" and a small "Show top 10" link (top-right) clears the
+   selection and reverts. Hovering a legend item highlights that line and dims
+   the rest. This panel is **sticky**: it pins to the top of the viewport while
+   the table below scrolls, so the selection's effect stays visible (the table's
+   sticky header sits just beneath it — offsets driven by the `--growth-h` /
+   `--header-h` CSS variables set in `setStickyOffsets`).
 
 ## Papers table
 - Paginated, 25 rows/page. Default sort: citations descending; sortable by any
@@ -96,6 +111,13 @@ canvases except where noted; each panel has a fixed compact height.
 - A small **Clear filters** button in the panel header appears only when a
   filter is active (text filters or a non-"all" Type selection) and resets them
   all.
+- **Row selection**: a checkbox column with a master toggle in the header
+  (select/deselect all filtered rows, with an indeterminate state for a partial
+  selection). Selecting rows drives the citation-growth chart (chart 6);
+  selected rows are highlighted. Selection persists across paging, but **any
+  filter change clears it** and reverts the chart to the top 10.
+- The **header is sticky** (both the column-header row and the filter row stay
+  pinned while scrolling the table, just below the pinned citation-growth chart).
 
 ## Visual style
 Modern dashboard — cards, subtle shadows, rounded corners. Content centered in

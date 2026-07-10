@@ -329,7 +329,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-size: 12px;
     color: var(--text-dim);
   }
-  .topic-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .topic-legend span { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .topic-legend span.off { opacity: 0.4; text-decoration: line-through; }
   .topic-legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
   .collab-cloud {
     display: flex;
@@ -376,13 +377,38 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
+    position: sticky;
+    z-index: 2;
+  }
+  thead tr:first-child th { top: var(--growth-h, 0px); }
+  .filter-row th {
+    background: var(--card);
+    z-index: 1;
+    cursor: default;
+    top: calc(var(--growth-h, 0px) + var(--header-h, 33px));
+  }
+  .growth-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    box-shadow: 0 6px 14px -10px rgba(0,0,0,0.35);
   }
   th .sort-arrow { font-size: 10px; opacity: 0.6; }
   th.title-col { width: 32%; }
   th.authors-col { width: 18%; }
   th.journal-col { width: 16%; }
+  th.chk-col, td.chk-col { width: 24px; text-align: center; padding-left: 6px; padding-right: 6px; cursor: default; }
+  th.chk-col input, td.chk-col input { cursor: pointer; margin: 0; }
+  tr.sel td { background: var(--accent-soft); }
   td a { color: var(--accent); text-decoration: none; }
   td a:hover { text-decoration: underline; }
+  .revert-link {
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    white-space: nowrap;
+  }
   .filter-row input {
     width: 100%;
     padding: 4px 6px;
@@ -530,6 +556,22 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       citations only from then on.
     </div>
   </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Top 50 most-cited papers</h2>
+    <button id="resetZoom" class="reset-zoom" hidden>Reset zoom</button>
+  </div>
+  <div id="topicLegend" class="topic-legend"></div>
+  <div class="chart-wrap" style="height:380px"><canvas id="scatterChart"></canvas></div>
+  <div class="caption">
+    Bubble = a paper, by year and citations, coloured by OpenAlex topic. Drag to
+    zoom into a region, Shift+drag to pan. Hover for details, click to open.
+  </div>
+</div>
+
+<div class="charts">
   <div class="card">
     <h2>Top 20 collaborators</h2>
     <div id="collabCloud" class="collab-cloud" style="height:280px"></div>
@@ -542,24 +584,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="card">
+<div class="card growth-sticky" id="growthCard">
   <div class="card-head">
-    <h2>Top 50 most-cited papers</h2>
-    <button id="resetZoom" class="reset-zoom" hidden>Reset zoom</button>
+    <h2 id="growthTitle">Citation growth of top 10 most-cited papers</h2>
+    <a id="growthRevert" class="revert-link" hidden>Show top 10</a>
   </div>
-  <div id="topicLegend" class="topic-legend"></div>
-  <div class="chart-wrap" style="height:380px"><canvas id="scatterChart"></canvas></div>
+  <div class="chart-wrap" style="height:300px"><canvas id="topPapersChart"></canvas></div>
   <div class="caption">
-    Bubble = a paper, by year and citations, coloured by OpenAlex topic. Drag to
-    zoom, Shift+drag to pan, scroll to zoom. Hover for details, click to open.
-  </div>
-</div>
-
-<div class="card">
-  <h2>Citation growth of top 10 most-cited papers</h2>
-  <div class="chart-wrap" style="height:320px"><canvas id="topPapersChart"></canvas></div>
-  <div class="caption">
-    Cumulative citations per year, from __CITE_START_YEAR__ on.
+    Cumulative citations per year. Each line starts at the paper's publication
+    year. OpenAlex per-year data begins __CITE_START_YEAR__.
   </div>
 </div>
 
@@ -571,6 +604,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <table>
     <thead>
       <tr>
+        <th class="chk-col"><input type="checkbox" id="selectAll" title="Select all / none"></th>
         <th class="title-col" data-col="title">Title <span class="sort-arrow"></span></th>
         <th data-col="year">Year <span class="sort-arrow"></span></th>
         <th data-col="citations">Citations <span class="sort-arrow"></span></th>
@@ -579,6 +613,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <th data-col="type">Type <span class="sort-arrow"></span></th>
       </tr>
       <tr class="filter-row">
+        <th class="chk-col"></th>
         <th><input data-filter="title" placeholder="filter title..."></th>
         <th><input data-filter="year" placeholder="e.g. 2010-2020"></th>
         <th><input data-filter="citations" placeholder="e.g. &gt;100"></th>
@@ -605,6 +640,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <script>
 const WORKS = __WORKS_DATA__;
+WORKS.forEach((w, i) => { w._id = i; });   // stable id for row selection
 const TOP_PAPERS = __TOP_PAPERS_DATA__;
 
 // ---------- stat tiles ----------
@@ -792,17 +828,18 @@ function firstAuthorLastName(w) {
   return w.authors[0].trim().split(/\s+/).pop();
 }
 
-function buildTopPapersCitationGrowth(limit) {
-  const top = [...WORKS].sort((a, b) => b.citations - a.citations).slice(0, limit);
+// Cumulative citations-per-year lines for a given list of works.
+function buildCitationGrowth(list) {
   const yearsSet = new Set();
-  top.forEach(w => (w.countsByYear || []).forEach(c => yearsSet.add(c.year)));
+  list.forEach(w => (w.countsByYear || []).forEach(c => yearsSet.add(c.year)));
   const years = [...yearsSet].sort((a, b) => a - b);
 
-  const datasets = top.map((w, i) => {
+  const datasets = list.map((w, i) => {
     const byYear = {};
     (w.countsByYear || []).forEach(c => { byYear[c.year] = c.citations; });
     let cumulative = 0;
     const data = years.map(y => {
+      if (y < w.year) return null;   // line starts at the paper's publication year
       cumulative += (byYear[y] || 0);
       return cumulative;
     });
@@ -811,6 +848,7 @@ function buildTopPapersCitationGrowth(limit) {
       data,
       borderColor: LINE_PALETTE[i % LINE_PALETTE.length],
       backgroundColor: LINE_PALETTE[i % LINE_PALETTE.length],
+      borderWidth: 2,
       fill: false,
       tension: 0.2,
     };
@@ -819,17 +857,66 @@ function buildTopPapersCitationGrowth(limit) {
   return { years, datasets };
 }
 
+// Emphasise one line (dim the rest) on growth-legend hover; keepIdx=null restores.
+function dimGrowthExcept(chart, keepIdx) {
+  if (chart._dim === keepIdx) return;
+  chart._dim = keepIdx;
+  chart.data.datasets.forEach((ds, i) => {
+    const base = LINE_PALETTE[i % LINE_PALETTE.length];
+    const dim = keepIdx !== null && i !== keepIdx;
+    ds.borderColor = dim ? base + "22" : base;
+    ds.borderWidth = keepIdx !== null && i === keepIdx ? 3.5 : dim ? 1 : 2;
+  });
+  chart.update("none");
+}
+
+// The citation-growth chart shows the selected papers when any are ticked,
+// otherwise the top 10 most-cited. Re-run on selection or theme change.
+function renderTopPapersChart() {
+  const { textMuted, grid } = getAccentColors();
+  const sel = [...state.selected].map(id => WORKS[id]).filter(Boolean);
+  const usingSelection = sel.length > 0;
+  const list = (usingSelection ? sel : [...WORKS])
+    .sort((a, b) => b.citations - a.citations)
+    .slice(0, usingSelection ? sel.length : 10);
+  const growth = buildCitationGrowth(list);
+
+  document.getElementById("growthTitle").textContent = usingSelection
+    ? `Citation growth of selected papers (${list.length})`
+    : "Citation growth of top 10 most-cited papers";
+  document.getElementById("growthRevert").hidden = !usingSelection;
+
+  Chart.defaults.color = textMuted;
+  Chart.defaults.borderColor = grid;
+  if (topPapersChart) topPapersChart.destroy();
+  topPapersChart = new Chart(document.getElementById("topPapersChart"), {
+    type: "line",
+    data: { labels: growth.years, datasets: growth.datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom", labels: { boxWidth: 12, font: { size: 11 } },
+          onHover: (e, item, legend) => dimGrowthExcept(legend.chart, item.datasetIndex),
+          onLeave: (e, item, legend) => dimGrowthExcept(legend.chart, null),
+        },
+      },
+      scales: { y: { title: { display: true, text: "Cumulative citations" } } },
+    },
+  });
+  if (typeof setStickyOffsets === "function") setStickyOffsets();
+}
+
 function renderCharts() {
   const { accent, accent2, accent3, text, textMuted, grid } = getAccentColors();
   const pubs = buildPubsPerYear();
   const cites = buildCitationsOverTime();
   const collab = buildTopCollaborators(20);
   const journals = buildTopJournals(18);
-  const topPapers = buildTopPapersCitationGrowth(10);
 
   if (pubsChart) pubsChart.destroy();
   if (citesChart) citesChart.destroy();
-  if (topPapersChart) topPapersChart.destroy();
   if (scatterChart) scatterChart.destroy();
 
   // Canvas can't read CSS variables, so drive Chart.js text/grid colours from
@@ -898,34 +985,39 @@ function renderCharts() {
     },
   });
 
-  topPapersChart = new Chart(document.getElementById("topPapersChart"), {
-    type: "line",
-    data: {
-      labels: topPapers.years,
-      datasets: topPapers.datasets,
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 11 } } },
-      },
-      scales: {
-        y: { title: { display: true, text: "Cumulative citations" } },
-      },
-    },
-  });
-
+  renderTopPapersChart();
   renderScatter(text, textMuted, grid);
 }
 
 // ---------- top-papers scatter: year vs citations, coloured by topic ----------
+// Highlight one topic's bubbles (dim the rest) on legend hover; keepIdx=null restores.
+function dimScatterExcept(keepIdx) {
+  if (!scatterChart || scatterChart._dim === keepIdx) return;
+  scatterChart._dim = keepIdx;
+  scatterChart.data.datasets.forEach((ds, i) => {
+    const base = (TOP_PAPERS.legend[i] || {}).color || "#888";
+    const dim = keepIdx !== null && i !== keepIdx;
+    ds.backgroundColor = base + (dim ? "18" : "cc");
+    ds.borderColor = dim ? base + "33" : base;
+  });
+  scatterChart.update("none");
+}
+
 function renderTopicLegend() {
   const host = document.getElementById("topicLegend");
   host.innerHTML = "";
-  TOP_PAPERS.legend.forEach(l => {
+  TOP_PAPERS.legend.forEach((l, i) => {
     const s = document.createElement("span");
     s.innerHTML = `<span class="sw" style="background:${l.color}"></span>${escapeHtml(l.label)}`;
+    s.addEventListener("mouseenter", () => dimScatterExcept(i));
+    s.addEventListener("mouseleave", () => dimScatterExcept(null));
+    s.addEventListener("click", () => {           // toggle the topic's bubbles
+      if (!scatterChart) return;
+      const vis = scatterChart.isDatasetVisible(i);
+      scatterChart.setDatasetVisibility(i, !vis);
+      s.classList.toggle("off", vis);
+      scatterChart.update();
+    });
     host.appendChild(s);
   });
 }
@@ -973,6 +1065,7 @@ function renderScatter(text, textMuted, grid) {
 
       const cands = [];
       chart.data.datasets.forEach((ds, di) => {
+        if (!chart.isDatasetVisible(di)) return;   // skip labels for hidden topics
         const meta = chart.getDatasetMeta(di);
         ds.data.forEach((pt, pi) => {
           const el = meta.data[pi];
@@ -1037,7 +1130,7 @@ function renderScatter(text, textMuted, grid) {
         zoom: {
           pan: { enabled: true, mode: "xy", modifierKey: "shift", onPanComplete: showResetBtn },
           zoom: {
-            wheel: { enabled: true, speed: 0.2 },
+            wheel: { enabled: false },
             drag: { enabled: true, backgroundColor: "rgba(90,120,200,0.15)",
                     borderColor: "rgba(90,120,200,0.6)", borderWidth: 1 },
             mode: "xy",
@@ -1085,6 +1178,7 @@ document.getElementById("resetZoom").addEventListener("click", () => {
 const state = {
   filters: { title: "", year: "", citations: "", journal: "", authors: "" },
   types: null,   // Set of selected type keys; null = all types shown
+  selected: new Set(),   // work ids ticked in the table
   sortCol: "citations",
   sortDir: "desc",
   page: 1,
@@ -1111,8 +1205,7 @@ function clearAllFilters() {
     state.filters[inp.getAttribute("data-filter")] = "";
   });
   resetTypeFilter();
-  state.page = 1;
-  renderTable();
+  afterFilterChange();
 }
 
 function typeKeyOf(w) {
@@ -1197,7 +1290,9 @@ function renderTable() {
     const titleCell = w.doi
       ? `<a href="${w.doi}" target="_blank" rel="noopener">${escapeHtml(w.title)}</a>`
       : escapeHtml(w.title);
-    return `<tr>
+    const sel = state.selected.has(w._id);
+    return `<tr${sel ? ' class="sel"' : ""}>
+      <td class="chk-col"><input type="checkbox" data-id="${w._id}"${sel ? " checked" : ""}></td>
       <td>${titleCell}</td>
       <td>${w.year}</td>
       <td>${w.citations.toLocaleString()}</td>
@@ -1218,7 +1313,60 @@ function renderTable() {
   });
 
   updateClearBtn();
+  updateMasterCheckbox();
 }
+
+// A filter change clears any row selection and reverts the growth chart to the
+// top 10, then re-renders the table.
+function afterFilterChange() {
+  const hadSelection = state.selected.size > 0;
+  state.selected.clear();
+  state.page = 1;
+  renderTable();
+  if (hadSelection) renderTopPapersChart();
+}
+
+// ---------- row selection ----------
+function updateMasterCheckbox() {
+  const master = document.getElementById("selectAll");
+  if (!master) return;
+  const filtered = getFilteredSorted();
+  const selCount = filtered.reduce((n, w) => n + (state.selected.has(w._id) ? 1 : 0), 0);
+  master.checked = filtered.length > 0 && selCount === filtered.length;
+  master.indeterminate = selCount > 0 && selCount < filtered.length;
+}
+
+function onSelectionChanged() {
+  updateMasterCheckbox();
+  renderTopPapersChart();
+}
+
+// Toggle an individual row checkbox (event-delegated on the tbody).
+document.getElementById("tableBody").addEventListener("change", (e) => {
+  const cb = e.target;
+  if (cb.tagName !== "INPUT" || cb.type !== "checkbox") return;
+  const id = Number(cb.getAttribute("data-id"));
+  if (cb.checked) state.selected.add(id); else state.selected.delete(id);
+  cb.closest("tr").classList.toggle("sel", cb.checked);
+  onSelectionChanged();
+});
+
+// Master checkbox: select / deselect every row matching the current filter.
+document.getElementById("selectAll").addEventListener("change", (e) => {
+  const on = e.target.checked;
+  getFilteredSorted().forEach(w => {
+    if (on) state.selected.add(w._id); else state.selected.delete(w._id);
+  });
+  renderTable();
+  renderTopPapersChart();
+});
+
+// Revert link: clear the selection and go back to the top-10 view.
+document.getElementById("growthRevert").addEventListener("click", () => {
+  state.selected.clear();
+  renderTable();
+  renderTopPapersChart();
+});
 
 document.getElementById("clearFilters").addEventListener("click", clearAllFilters);
 
@@ -1239,8 +1387,7 @@ document.querySelectorAll("th[data-col]").forEach(th => {
 document.querySelectorAll("input[data-filter]").forEach(input => {
   input.addEventListener("input", () => {
     state.filters[input.getAttribute("data-filter")] = input.value;
-    state.page = 1;
-    renderTable();
+    afterFilterChange();
   });
 });
 
@@ -1283,8 +1430,7 @@ function initTypeFilter() {
     cb.addEventListener("change", () => {
       if (cb.checked) state.types.add(t); else state.types.delete(t);
       updateSummary();
-      state.page = 1;
-      renderTable();
+      afterFilterChange();
     });
     boxes.push(cb);
     label.appendChild(cb);
@@ -1296,8 +1442,7 @@ function initTypeFilter() {
     state.types = on ? new Set(allTypes) : new Set();
     boxes.forEach(cb => { cb.checked = on; });
     updateSummary();
-    state.page = 1;
-    renderTable();
+    afterFilterChange();
   }
   all.addEventListener("click", () => setAll(true));
   none.addEventListener("click", () => setAll(false));
@@ -1336,11 +1481,26 @@ document.getElementById("themeSelect").addEventListener("change", (e) => {
   renderCharts();
 });
 
+// Sticky layout: the citation-growth card pins to the top, the table's
+// column-header row sticks just below it, and the filter row below that. Column
+// widths come from the CSS vars set here (recomputed when the growth card's
+// height changes, e.g. its legend grows with the selection).
+function setStickyOffsets() {
+  const g = document.getElementById("growthCard");
+  const gh = g ? Math.ceil(g.getBoundingClientRect().height) : 0;
+  const hr = document.querySelector("thead tr:first-child th");
+  const hh = hr ? Math.ceil(hr.getBoundingClientRect().height) : 33;
+  document.documentElement.style.setProperty("--growth-h", gh + "px");
+  document.documentElement.style.setProperty("--header-h", hh + "px");
+}
+window.addEventListener("resize", setStickyOffsets);
+
 // ---------- init ----------
 renderTiles();
 renderCharts();
 initTypeFilter();
 renderTable();
+setStickyOffsets();
 </script>
 
 </body>
