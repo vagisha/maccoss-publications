@@ -21,6 +21,22 @@ growth. Data comes from OpenAlex (ORCID `0000-0003-1853-0256`), fetched by
   for drag-to-pan gestures) load from a CDN (needs internet for charts; the
   table works offline).
 
+## Building & previewing
+- **`index.html` is generated — never hand-edit it.** All markup, CSS, and JS
+  live in the `HTML_TEMPLATE` string inside `build_page.py`, alongside the
+  Python that processes the data. Edit `build_page.py`, then run
+  `python build_page.py` to regenerate `index.html`.
+- To refresh the data first: `python fetch_openalex_works.py` (re-fetches all
+  works from OpenAlex into `openalex_works.json`), then `python build_page.py`.
+- Preview by opening `index.html` in a browser (works via `file://`) or serving
+  the folder (`python -m http.server`).
+- Sanity check after a build: the page loads with no console errors and the
+  stat tiles / `Papers (N)` count match the numbers `build_page.py` prints.
+- The project is a git repo pushed to GitHub
+  (`github.com/vagisha/maccoss-publications`). The monthly Action reruns
+  fetch + build and commits the refreshed `openalex_works.json` and `index.html`.
+  `.claude/` and `__pycache__/` are git-ignored.
+
 ## Header
 - Title: **Michael J. MacCoss**. Affiliation: University of Washington,
   Department of Genome Sciences.
