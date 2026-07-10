@@ -1,105 +1,90 @@
 # Publications & Citations Page — Spec
 
 ## Overview
-A single self-contained `index.html` file, opened directly in a browser (no
-server required), showing Michael J. MacCoss's publications and citation
-growth, sourced from `openalex_works.json` (483 works, fetched via
-`fetch_openalex_works.py` from OpenAlex using ORCID
-`0000-0003-1853-0256`).
+A single self-contained `index.html`, opened directly in any browser (no
+server needed), showing Michael J. MacCoss's publications and citation
+growth. Data comes from OpenAlex (ORCID `0000-0003-1853-0256`), fetched by
+`fetch_openalex_works.py` and refreshed monthly by a GitHub Action.
 
 ## Data loading
-- `index.html` loads `openalex_works.json` via `fetch()` at page load
-  (works when opened via a local web server or `file://` in browsers that
-  allow local fetch; if `file://` fetch is blocked by the browser, the JSON
-  will be inlined into the HTML as a fallback so the page always works
-  standalone).
-- Chart.js is loaded from a CDN (`<script src="https://cdn.jsdelivr.net/...">`).
-  Requires internet access for charts to render; page structure/table still
-  work offline.
+- `build_page.py` reduces `openalex_works.json` to the fields the page needs
+  and embeds them into `index.html` as an inline JS array — no runtime
+  `fetch()`, so the file works standalone via `file://`.
+- Chart.js loads from a CDN (needs internet for charts; table works offline).
 
 ## Header
-- Page title: just the name, **"Michael J. MacCoss"** (no subtitle).
-- Affiliation line: University of Washington, Department of Genome Sciences.
-- Three links, small and unobtrusive: **ORCID**, **Google Scholar**,
-  **Lab website**.
-  - ORCID: https://orcid.org/0000-0003-1853-0256
-  - Google Scholar: https://scholar.google.com/citations?user=icweOB0AAAAJ&hl=en
-  - Lab website: https://maccosslab.org/maccoss/
-- A small, unobtrusive **theme dropdown** in the header corner, offering at
-  least two accent-color palettes:
-  - **UW Purple/Gold** (#4B2E83 / #B7A57A)
-  - **Blue/Teal**
-  Switching updates accent colors used in tiles, chart series, and links.
-  Selection is not required to persist across reloads.
+- Title: **Michael J. MacCoss**. Affiliation: University of Washington,
+  Department of Genome Sciences.
+- Links: **ORCID**, **Google Scholar**, **Lab website**.
+- **Theme dropdown** with six themes. Each defines three accent colours —
+  `--accent` (headings, links, tile borders, publications bars, word cloud),
+  `--accent-2` (citations-per-year bars), `--accent-3` (cumulative line) —
+  plus `--accent-soft` (table header, type badges):
+  - **Classic navy** (default) — `#1e3a70` / `#6f97d6` / `#d97757`
+  - **Charcoal** — `#374151` / `#9aa5b1` / `#10b981`
+  - **Indigo** — `#4f46e5` / `#a5b4fc` / `#f472b6`
+  - **Emerald** — `#047857` / `#6ee7b7` / `#0ea5e9`
+  - **Midnight (dark)** — `#8ab4f8` / `#38bdf8` / `#f472b6`
+  - **Carbon (dark)** — `#a78bfa` / `#c4b5fd` / `#34d399`
+- All surfaces/text are CSS variables, so the dark themes flip the whole page
+  (background, cards, text, borders), not just the accents. Chart.js reads the
+  resolved variables at render time so axes stay legible on dark themes.
+  Selection need not persist across reloads.
 
 ## Summary stat tiles
-Row of tiles below the header, above the charts:
-1. **Total papers** — count of all works in the dataset.
-2. **Total citations** — sum of `cited_by_count` across all works.
-3. **h-index** — computed client-side from each paper's `cited_by_count`.
-4. **Most-cited paper** — title + citation count of the single highest-cited
-   work, as a highlighted tile (clicking it could scroll to/highlight the row
-   in the table — nice-to-have, not required).
+Three tiles: **Total papers**, **Total citations**, **h-index** (h-index
+computed client-side from each paper's citation count).
 
 ## Charts
-Two chart panels, side by side or stacked, both using Chart.js:
+Four panels in a 2-column grid; each has a fixed compact height
+(`maintainAspectRatio: false`). Three are Chart.js canvases; the
+collaborators panel is themed HTML.
 
-1. **Publications per year**
-   - Combo chart: bar series = number of papers published that year, line
-     series (secondary axis) = cumulative total citations by year.
-   - X-axis: publication year, full range from earliest to latest paper.
-
-2. **Citations over time**
-   - Two series shown together (or as two small charts): cumulative total
-     citations by year, and citations received per year.
-   - **Data limitation**: OpenAlex's `counts_by_year` field only provides
-     per-year citation counts for roughly the last ~10 years (currently
-     ~2015/2016–2026), not full history back to each paper's publication
-     date. Per your choice, this chart will only cover the years OpenAlex
-     actually provides data for (so the x-axis range here will be shorter
-     than the publications-per-year chart). A short caption under the chart
-     will note this limitation.
-   - Cumulative citations = running sum of per-year citation counts across
-     all papers, for the years in range.
+1. **Publications per year** — single-series bar chart of papers per year,
+   full year range.
+2. **Citations over time** — bars = citations received per year, line =
+   cumulative citations. Limited to OpenAlex's ~10-year `counts_by_year`
+   window (captioned), so a shorter x-axis than chart 1. The line is drawn
+   over the bars with a heavier stroke to stay visible.
+3. **Top 20 collaborators** — word cloud: each co-author's surname sized by
+   number of shared papers, exact count printed after the name, full name on
+   hover. Co-authors keyed by OpenAlex author ID (not name); MacCoss himself
+   excluded. Uses `--accent` at graduated opacity.
+4. **Citation growth of top 10 most-cited papers** — one cumulative line per
+   paper over the ~10-year window. Fixed 10-colour palette (legible on light
+   and dark). Legend labels are `first-author-lastname (year)`.
 
 ## Papers table
-- Paginated, **25 rows per page**, with page controls (prev/next, page
-  numbers).
-- Default sort: **citation count, descending**. A sort control lets the
-  user switch to sort by year or citations (asc/desc).
-- Every column is **filterable**:
-  - Title, Journal/venue, Type: text/substring filter.
-  - Authors: text/substring filter (matches against author names).
-  - Year: numeric filter supporting `<x`, `>x`, and `x-y` range syntax.
-  - Citations: numeric filter supporting `<x`, `>x`, and `x-y` range syntax.
-- Columns:
-  1. **Title** — linked to the DOI (opens in new tab) when a DOI is present.
-  2. **Year**
-  3. **Citations**
-  4. **Journal/venue** (from `primary_location.source.display_name`)
-  5. **Authors** — full author list normally; if the paper has **more than 7
-     authors**, show only first and last author (e.g. "J. Smith ... M.
-     MacCoss") with a way to see the full list (e.g. hover title / small
-     "+N more" expandable).
-  6. **Type** — OpenAlex `type` field (article, dataset, paratext, etc.),
-     shown and filterable so non-article entries (datasets, posters, etc.)
-     are visible rather than silently excluded.
+- Paginated, 25 rows/page. Default sort: citations descending; sortable by any
+  column.
+- Every column filterable: text/substring for Title, Journal, Type, Authors;
+  numeric `<x` / `>x` / `x-y` for Year and Citations.
+- Columns: **Title** (DOI link when present), **Year**, **Citations**,
+  **Journal**, **Authors** (first + last only when >7 authors, expandable),
+  **Type**.
 
 ## Visual style
-- "Modern dashboard" look: card-based sections with subtle shadows/borders,
-  rounded corners, generous whitespace, accent color per the theme dropdown
-  above.
-- Desktop-optimized only — no mobile/responsive layout requirement.
+Modern dashboard — cards, subtle shadows, rounded corners. Content centered in
+a `max-width: 1180px` column. Desktop-optimized only.
 
-## Files in this folder after this step
-- `fetch_openalex_works.py` — script used to fetch/refresh the OpenAlex data.
-- `openalex_works.json` — raw fetched data (483 works).
+## Data quality
+OpenAlex's author clustering merged **Malcolm MacCoss** (a Merck chemist, raw
+name "MacCoss, M.") into this ORCID's Author ID, pulling in two crystal-
+structure deposits (CCDC 117932, CCDC 245444). `fetch_openalex_works.py`
+excludes those work IDs (`EXCLUDED_WORK_IDS`). `flag_outlier_papers.py` flags
+further possible misattributions for manual review.
+
+## Files
+- `fetch_openalex_works.py` — fetch/refresh OpenAlex data; excludes known
+  misattributions.
+- `flag_outlier_papers.py` — flag papers that may not be MacCoss's.
+- `build_page.py` — build `index.html` from `openalex_works.json`.
+- `openalex_works.json` — fetched data.
+- `index.html` — the built page.
+- `.github/workflows/update-publications.yml` — monthly auto-refresh.
 - `spec.md` — this file.
-- `index.html` — the built page (created only after this spec is approved).
 
 ## Verification (after build)
-- Confirm `index.html` and its inline/linked JavaScript are well-formed
-  (no syntax errors).
-- Confirm the page successfully loads `openalex_works.json` and that the
-  loaded paper count matches 483 (and total citations matches 46,964, or
-  the current numbers in the file if it's been refreshed).
+- `index.html` and its inline JS are well-formed (no syntax errors).
+- Embedded paper count and total citations match `openalex_works.json`
+  (currently 481 papers / 46,981 citations; changes as the Action runs).
