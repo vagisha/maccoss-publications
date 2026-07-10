@@ -10,6 +10,13 @@ growth. Data comes from OpenAlex (ORCID `0000-0003-1853-0256`), fetched by
 - `build_page.py` reduces `openalex_works.json` to the fields the page needs
   and embeds them into `index.html` as an inline JS array — no runtime
   `fetch()`, so the file works standalone via `file://`.
+- **Preprints are excluded** from the whole page (`is_preprint` in
+  `build_page.py`): OpenAlex `type: preprint`, or a source that is a preprint
+  server (bioRxiv, arXiv, medRxiv, ChemRxiv, …). They inflate the per-year
+  counts and are usually preprint versions of papers already counted from
+  their published journal. The raw `openalex_works.json` still contains them;
+  the filter is applied at build time so every panel and the totals are
+  consistent.
 - Chart.js loads from a CDN (needs internet for charts; table works offline).
 
 ## Header
@@ -36,9 +43,8 @@ Three tiles: **Total papers**, **Total citations**, **h-index** (h-index
 computed client-side from each paper's citation count).
 
 ## Charts
-Four panels in a 2-column grid; each has a fixed compact height
-(`maintainAspectRatio: false`). Three are Chart.js canvases; the
-collaborators panel is themed HTML.
+A 2×2 grid of panels, then two full-width panels above the table. Chart.js
+canvases except where noted; each panel has a fixed compact height.
 
 1. **Publications per year** — single-series bar chart of papers per year,
    full year range.
@@ -46,19 +52,44 @@ collaborators panel is themed HTML.
    cumulative citations. Limited to OpenAlex's ~10-year `counts_by_year`
    window (captioned), so a shorter x-axis than chart 1. The line is drawn
    over the bars with a heavier stroke to stay visible.
-3. **Top 20 collaborators** — word cloud: each co-author's surname sized by
-   number of shared papers, exact count printed after the name, full name on
-   hover. Co-authors keyed by OpenAlex author ID (not name); MacCoss himself
-   excluded. Uses `--accent` at graduated opacity.
-4. **Citation growth of top 10 most-cited papers** — one cumulative line per
-   paper over the ~10-year window. Fixed 10-colour palette (legible on light
-   and dark). Legend labels are `first-author-lastname (year)`.
+3. **Top 20 collaborators** — word cloud (themed HTML): each co-author's
+   surname sized by number of shared papers, exact count printed after the
+   name, full name on hover. Co-authors keyed by OpenAlex author ID (not name);
+   MacCoss himself excluded. Uses `--accent` at graduated opacity.
+4. **Top journals** — word cloud (same renderer as collaborators), each journal
+   sized by number of papers published there. Preprint servers and data
+   repositories (bioRxiv, arXiv, Figshare, …) are excluded.
+5. **Top 50 papers, by research community** — full-width constellation (SVG,
+   built at render time), above the citation-growth panel. Each star is one of
+   the 50 most-cited papers, sized by citations, on a fixed dark "sky"
+   background (so it reads on light themes too); brightest stars are drawn last
+   so the top papers stay visible. Papers are grouped into co-author communities
+   and linked with faint lines:
+   - Community detection: over the top 50, build a shared-co-author graph where
+     each shared author is weighted `1 / (papers they appear on in the top 50)`
+     — this down-weights lab-wide hub authors (Merrihew, MacLean) so specialist
+     collaborators drive the grouping. Papers are linked (and unioned into one
+     community) when their summed weight clears a threshold (0.5). Computed in
+     `build_page.py`; positions come from a small deterministic force-directed
+     layout (with citation-weighted repulsion so big stars spread apart), also
+     in `build_page.py`.
+   - The largest few communities are coloured and labelled by the OpenAlex
+     topic carrying the most citation weight in them; smaller/singleton
+     communities are grey ("Other"). Labels for small mixed communities are
+     approximate (they reflect the community's citation-weighted OpenAlex
+     topic). Hover shows title + citations + topic; click opens the DOI.
+6. **Citation growth of top 10 most-cited papers** — full-width panel above the
+   table. One cumulative line per paper over the ~10-year window. Fixed
+   10-colour palette (legible on light and dark). Legend labels are
+   `first-author-lastname (year)`.
 
 ## Papers table
 - Paginated, 25 rows/page. Default sort: citations descending; sortable by any
   column.
-- Every column filterable: text/substring for Title, Journal, Type, Authors;
-  numeric `<x` / `>x` / `x-y` for Year and Citations.
+- Column filters: text/substring for Title, Journal, Authors; numeric
+  `<x` / `>x` / `x-y` for Year and Citations; **Type** is a checkbox dropdown
+  (one entry per distinct type, with counts, plus All/None) so the user picks
+  the types to show instead of typing.
 - Columns: **Title** (DOI link when present), **Year**, **Citations**,
   **Journal**, **Authors** (first + last only when >7 authors, expandable),
   **Type**.
@@ -86,5 +117,6 @@ further possible misattributions for manual review.
 
 ## Verification (after build)
 - `index.html` and its inline JS are well-formed (no syntax errors).
-- Embedded paper count and total citations match `openalex_works.json`
-  (currently 481 papers / 46,981 citations; changes as the Action runs).
+- Embedded paper count and total citations are the post-preprint-filter totals
+  (currently 397 papers / 46,586 citations from 481 fetched; changes as the
+  Action runs).

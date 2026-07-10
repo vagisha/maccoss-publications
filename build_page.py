@@ -11,10 +11,203 @@ Usage:
 """
 
 import json
+import math
+import random
+import re
+from collections import Counter, defaultdict
 
 SOURCE_FILE = "openalex_works.json"
 OUTPUT_FILE = "index.html"
 MACCOSS_ID = "https://openalex.org/A5043959168"
+
+# Preprints (bioRxiv, arXiv, etc.) are excluded from the whole page: they
+# inflate the per-year counts and are usually preprint versions of papers
+# already counted from their published journal.
+PREPRINT_SOURCE = re.compile(
+    r"biorxiv|medrxiv|arxiv|chemrxiv|research square|ssrn|authorea|preprints", re.I)
+
+
+def is_preprint(w):
+    if (w.get("type") or "").lower() == "preprint":
+        return True
+    src = (w.get("primary_location") or {}).get("source") or {}
+    return bool(PREPRINT_SOURCE.search(src.get("display_name") or ""))
+
+# ---- constellation (top-N papers grouped into co-author communities) ----
+CONSTELLATION_TOP_N = 50
+# Edge threshold on the hub-down-weighted shared-co-author score. Two papers
+# are linked when they share co-authors whose summed 1/(papers-they-appear-on)
+# weight clears this bar, so ubiquitous "hub" authors (who are on many papers)
+# contribute little and specialist collaborators drive the grouping.
+CONSTELLATION_EDGE_THRESHOLD = 0.5
+CONSTELLATION_MAX_NAMED = 6  # colour+label this many communities; rest are "Other"
+# Distinct star colours for the named communities (bright on a dark sky).
+CONSTELLATION_COLORS = [
+    "#8ab4f8", "#5eead4", "#fcd34d", "#c4b5fd", "#fda4af", "#86efac",
+]
+CONSTELLATION_OTHER_COLOR = "#8b93a7"
+
+
+def _coauthor_ids(w):
+    ids = set()
+    for a in w.get("authorships") or []:
+        au = a.get("author") or {}
+        aid = au.get("id")
+        if aid and aid != MACCOSS_ID:
+            ids.add(aid)
+    return ids
+
+
+def _topic_of(w):
+    return (w.get("primary_topic") or {}).get("display_name") or "Uncategorized"
+
+
+def _shorten(label, n=30):
+    return label if len(label) <= n else label[: n - 1].rstrip() + "…"
+
+
+def _force_layout(n, edges, weight=None, iters=420, seed=42):
+    """Small deterministic Fruchterman-Reingold layout with gravity, returning
+    positions normalised into [0, 1]. Disconnected papers drift to the edges;
+    densely linked communities clump together. `weight` (0..1 per node, e.g.
+    scaled citations) boosts repulsion so the biggest stars spread apart and
+    stay individually visible instead of merging into a blob."""
+    rng = random.Random(seed)
+    pos = [[rng.uniform(0, 1), rng.uniform(0, 1)] for _ in range(n)]
+    if n <= 1:
+        return [[0.5, 0.5]] * n
+    if weight is None:
+        weight = [0.0] * n
+    k = 1.5 / math.sqrt(n)
+    temp = 0.12
+    for _ in range(iters):
+        disp = [[0.0, 0.0] for _ in range(n)]
+        for i in range(n):
+            for j in range(i + 1, n):
+                dx = pos[i][0] - pos[j][0]
+                dy = pos[i][1] - pos[j][1]
+                d = math.sqrt(dx * dx + dy * dy) + 1e-6
+                f = (k * k) / d * (1 + 1.8 * (weight[i] + weight[j]))
+                ux, uy = dx / d, dy / d
+                disp[i][0] += ux * f
+                disp[i][1] += uy * f
+                disp[j][0] -= ux * f
+                disp[j][1] -= uy * f
+        for a, b in edges:
+            dx = pos[a][0] - pos[b][0]
+            dy = pos[a][1] - pos[b][1]
+            d = math.sqrt(dx * dx + dy * dy) + 1e-6
+            f = (d * d) / k
+            ux, uy = dx / d, dy / d
+            disp[a][0] -= ux * f
+            disp[a][1] -= uy * f
+            disp[b][0] += ux * f
+            disp[b][1] += uy * f
+        for i in range(n):
+            disp[i][0] += (0.5 - pos[i][0]) * 0.06
+            disp[i][1] += (0.5 - pos[i][1]) * 0.06
+        for i in range(n):
+            dx, dy = disp[i]
+            dl = math.sqrt(dx * dx + dy * dy) + 1e-9
+            step = min(dl, temp)
+            pos[i][0] += dx / dl * step
+            pos[i][1] += dy / dl * step
+        temp = max(0.008, temp * 0.985)
+
+    xs = [p[0] for p in pos]
+    ys = [p[1] for p in pos]
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    pad = 0.07
+    for p in pos:
+        p[0] = pad + (1 - 2 * pad) * (p[0] - minx) / (maxx - minx + 1e-9)
+        p[1] = pad + (1 - 2 * pad) * (p[1] - miny) / (maxy - miny + 1e-9)
+    return pos
+
+
+def compute_constellation(raw_works):
+    """Top-N cited papers as stars, grouped into co-author communities and
+    labelled by the OpenAlex topic carrying the most citation weight."""
+    top = sorted(raw_works, key=lambda w: w.get("cited_by_count", 0), reverse=True)
+    top = top[:CONSTELLATION_TOP_N]
+    n = len(top)
+    ca = [_coauthor_ids(w) for w in top]
+
+    author_count = Counter()
+    for s in ca:
+        for a in s:
+            author_count[a] += 1
+
+    # Hub-down-weighted shared-co-author graph -> union-find components.
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            shared = ca[i] & ca[j]
+            if not shared:
+                continue
+            score = sum(1.0 / author_count[a] for a in shared)
+            if score >= CONSTELLATION_EDGE_THRESHOLD:
+                edges.append((i, j))
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[max(ri, rj)] = min(ri, rj)
+
+    members = defaultdict(list)
+    for i in range(n):
+        members[find(i)].append(i)
+
+    # Rank communities by size, then total citations; name the top few.
+    def comm_cites(idxs):
+        return sum(top[i].get("cited_by_count", 0) for i in idxs)
+
+    ranked = sorted(members.values(), key=lambda idxs: (len(idxs), comm_cites(idxs)), reverse=True)
+    named = [c for c in ranked if len(c) >= 2][:CONSTELLATION_MAX_NAMED]
+
+    comm_id = [-1] * n          # -1 == "Other"
+    comm_color = [CONSTELLATION_OTHER_COLOR] * n
+    legend = []
+    for ci, idxs in enumerate(named):
+        color = CONSTELLATION_COLORS[ci % len(CONSTELLATION_COLORS)]
+        weight = Counter()
+        for i in idxs:
+            weight[_topic_of(top[i])] += top[i].get("cited_by_count", 0)
+        label = weight.most_common(1)[0][0]
+        brightest = max(idxs, key=lambda i: top[i].get("cited_by_count", 0))
+        for i in idxs:
+            comm_id[i] = ci
+            comm_color[i] = color
+        legend.append({"label": label, "short": _shorten(label, 42), "color": color,
+                       "anchor": brightest})
+
+    max_c = max((top[i].get("cited_by_count", 0) for i in range(n)), default=1) or 1
+    weight = [math.sqrt(top[i].get("cited_by_count", 0) / max_c) for i in range(n)]
+    pos = _force_layout(n, edges, weight=weight, seed=42)
+
+    nodes = []
+    for i, w in enumerate(top):
+        nodes.append({
+            "title": w.get("display_name") or w.get("title"),
+            "year": w.get("publication_year"),
+            "citations": w.get("cited_by_count", 0),
+            "doi": w.get("doi"),
+            "topic": _topic_of(w),
+            "comm": comm_id[i],
+            "color": comm_color[i],
+            "x": round(pos[i][0], 4),
+            "y": round(pos[i][1], 4),
+            "isAnchor": any(lg["anchor"] == i for lg in legend),
+        })
+    for lg in legend:
+        lg.pop("anchor", None)
+
+    return {"nodes": nodes, "edges": edges, "legend": legend}
 
 
 def reduce_work(w):
@@ -56,17 +249,25 @@ def build():
     with open(SOURCE_FILE, encoding="utf-8") as f:
         raw_works = json.load(f)
 
+    n_before = len(raw_works)
+    raw_works = [w for w in raw_works if not is_preprint(w)]
+    n_preprints = n_before - len(raw_works)
+
     works = [reduce_work(w) for w in raw_works]
     works = [w for w in works if w["year"] is not None]
 
     data_json = json.dumps(works, ensure_ascii=False)
+    constellation_json = json.dumps(compute_constellation(raw_works), ensure_ascii=False)
 
-    html = HTML_TEMPLATE.replace("__WORKS_DATA__", data_json)
+    html = (HTML_TEMPLATE
+            .replace("__WORKS_DATA__", data_json)
+            .replace("__CONSTELLATION_DATA__", constellation_json))
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"Wrote {OUTPUT_FILE} with {len(works)} works embedded.")
+    print(f"Wrote {OUTPUT_FILE} with {len(works)} works embedded "
+          f"(excluded {n_preprints} preprints).")
     print(f"Total citations: {sum(w['citations'] for w in works)}")
 
 
@@ -204,6 +405,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     position: relative;
     width: 100%;
   }
+  .constellation-wrap {
+    position: relative;
+    width: 100%;
+    background: #0a0f1e;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .constellation-wrap svg { display: block; width: 100%; height: 100%; }
+  .constellation-wrap .star { cursor: pointer; }
+  .constellation-wrap text { font-family: -apple-system, "Segoe UI", sans-serif; }
   .collab-cloud {
     display: flex;
     flex-wrap: wrap;
@@ -295,6 +506,69 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     color: var(--accent);
     font-size: 11px;
   }
+  .type-filter { position: relative; font-weight: 400; }
+  .type-filter summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 4px 22px 4px 6px;
+    font-size: 12px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--card);
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    position: relative;
+  }
+  .type-filter summary::-webkit-details-marker { display: none; }
+  .type-filter summary::after {
+    content: "▾";
+    position: absolute;
+    right: 7px;
+    top: 4px;
+    font-size: 10px;
+    opacity: 0.6;
+  }
+  .type-menu {
+    position: absolute;
+    z-index: 20;
+    top: 100%;
+    left: 0;
+    margin-top: 3px;
+    min-width: 150px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px var(--shadow);
+    padding: 6px;
+  }
+  .type-menu label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 4px;
+    font-size: 12px;
+    font-weight: 400;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .type-menu label:hover { background: var(--accent-soft); border-radius: 4px; }
+  .type-menu .type-actions {
+    display: flex;
+    gap: 8px;
+    padding: 2px 4px 6px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+  }
+  .type-menu .type-actions a {
+    font-size: 11px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+  }
 </style>
 </head>
 <body>
@@ -342,16 +616,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div class="card">
     <h2>Top 20 collaborators</h2>
-    <div id="collabCloud" class="collab-cloud" style="height:260px"></div>
+    <div id="collabCloud" class="collab-cloud" style="height:280px"></div>
     <div class="caption">Text size = number of shared papers; exact count shown after each name.</div>
   </div>
   <div class="card">
-    <h2>Citation growth of top 10 most-cited papers</h2>
-    <div class="chart-wrap" style="height:260px"><canvas id="topPapersChart"></canvas></div>
-    <div class="caption">
-      Cumulative citations per year for each paper, using the same
-      ~10-year OpenAlex window noted above.
-    </div>
+    <h2>Top journals</h2>
+    <div id="journalCloud" class="collab-cloud" style="height:280px"></div>
+    <div class="caption">Text size = number of papers published there; preprint servers excluded.</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Top 50 papers, by research community</h2>
+  <div id="constellation" class="constellation-wrap" style="height:360px"></div>
+  <div class="caption">
+    Each star is a paper (size = citations); papers sharing co-authors form
+    constellations, coloured and named by their dominant OpenAlex topic.
+    Hover for details, click to open.
+  </div>
+</div>
+
+<div class="card">
+  <h2>Citation growth of top 10 most-cited papers</h2>
+  <div class="chart-wrap" style="height:320px"><canvas id="topPapersChart"></canvas></div>
+  <div class="caption">
+    Cumulative citations per year for each paper, using OpenAlex's ~10-year
+    per-year citation window.
   </div>
 </div>
 
@@ -373,7 +663,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <th><input data-filter="citations" placeholder="e.g. &gt;100"></th>
         <th><input data-filter="journal" placeholder="filter journal..."></th>
         <th><input data-filter="authors" placeholder="filter authors..."></th>
-        <th><input data-filter="type" placeholder="filter type..."></th>
+        <th>
+          <details class="type-filter" id="typeFilter">
+            <summary id="typeSummary">All types</summary>
+            <div class="type-menu" id="typeMenu"></div>
+          </details>
+        </th>
       </tr>
     </thead>
     <tbody id="tableBody"></tbody>
@@ -389,6 +684,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 <script>
 const WORKS = __WORKS_DATA__;
+const CONSTELLATION = __CONSTELLATION_DATA__;
 
 // ---------- stat tiles ----------
 function computeHIndex(citCounts) {
@@ -493,34 +789,66 @@ function lastNameOf(fullName) {
   return fullName.trim().split(/\s+/).pop();
 }
 
-// Render the top collaborators as a word cloud: font size scales with the
-// number of shared papers, and the exact count is printed after each name.
-// Uses the current theme accent colour at graduated opacity so it re-themes
-// along with the rest of the page.
-function renderCollaborators(collab, accent) {
-  const container = document.getElementById("collabCloud");
+// Preprint servers and data repositories reported by OpenAlex as "sources" —
+// excluded from the top-journals cloud since they aren't journals.
+const NON_JOURNAL = /biorxiv|medrxiv|arxiv|chemrxiv|figshare|zenodo|research square|ssrn|preprint|authorea|dryad|europe pmc/i;
+
+function buildTopJournals(limit) {
+  const counts = {};
+  WORKS.forEach(w => {
+    const j = w.journal;
+    if (!j || NON_JOURNAL.test(j)) return;
+    counts[j] = (counts[j] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit);
+}
+
+// Generic word cloud: font size scales with count, exact count printed after
+// each label, theme accent colour at graduated opacity so it re-themes.
+// entries: [{ text, count, title }]; minF/maxF bound the label font size.
+function renderWordCloud(hostId, entries, accent, minF, maxF) {
+  const container = document.getElementById(hostId);
   container.innerHTML = "";
-  if (!collab.length) return;
-  const maxCount = collab[0].count;
-  const minCount = collab[collab.length - 1].count;
+  if (!entries.length) return;
+  const maxCount = Math.max(...entries.map(e => e.count));
+  const minCount = Math.min(...entries.map(e => e.count));
   const span = maxCount - minCount || 1;
 
-  collab.forEach(c => {
-    const frac = (c.count - minCount) / span;
-    const fontSize = 15 + frac * 33;             // 15px .. 48px
-    const alpha = Math.round((0.62 + frac * 0.38) * 255) // 0.62 .. 1.0 opacity
+  entries.forEach(e => {
+    const frac = (e.count - minCount) / span;
+    const fontSize = minF + frac * (maxF - minF);
+    const alpha = Math.round((0.62 + frac * 0.38) * 255)
       .toString(16).padStart(2, "0");
 
     const item = document.createElement("span");
     item.className = "collab-item";
-    item.title = `${c.name}: ${c.count} shared paper${c.count === 1 ? "" : "s"}`;
+    item.title = e.title;
     item.innerHTML =
       `<span class="collab-name" style="font-size:${fontSize.toFixed(0)}px;color:${accent}${alpha};">` +
-        `${escapeHtml(lastNameOf(c.name))}</span>` +
+        `${escapeHtml(e.text)}</span>` +
       `<span class="collab-count" style="font-size:${Math.max(10, fontSize * 0.5).toFixed(0)}px;">` +
-        `${c.count}</span>`;
+        `${e.count}</span>`;
     container.appendChild(item);
   });
+}
+
+function renderCollaborators(collab, accent) {
+  renderWordCloud("collabCloud", collab.map(c => ({
+    text: lastNameOf(c.name),
+    count: c.count,
+    title: `${c.name}: ${c.count} shared paper${c.count === 1 ? "" : "s"}`,
+  })), accent, 15, 48);
+}
+
+function renderJournals(journals, accent) {
+  renderWordCloud("journalCloud", journals.map(j => ({
+    text: j.name,
+    count: j.count,
+    title: `${j.name}: ${j.count} paper${j.count === 1 ? "" : "s"}`,
+  })), accent, 12, 26);
 }
 
 function firstAuthorLastName(w) {
@@ -560,6 +888,7 @@ function renderCharts() {
   const pubs = buildPubsPerYear();
   const cites = buildCitationsOverTime();
   const collab = buildTopCollaborators(20);
+  const journals = buildTopJournals(18);
   const topPapers = buildTopPapersCitationGrowth(10);
 
   if (pubsChart) pubsChart.destroy();
@@ -572,6 +901,7 @@ function renderCharts() {
   Chart.defaults.borderColor = grid;
 
   renderCollaborators(collab, accent);
+  renderJournals(journals, accent);
 
   pubsChart = new Chart(document.getElementById("pubsChart"), {
     type: "bar",
@@ -652,12 +982,17 @@ function renderCharts() {
 
 // ---------- table: filter, sort, paginate ----------
 const state = {
-  filters: { title: "", year: "", citations: "", journal: "", authors: "", type: "" },
+  filters: { title: "", year: "", citations: "", journal: "", authors: "" },
+  types: null,   // Set of selected type keys; null = all types shown
   sortCol: "citations",
   sortDir: "desc",
   page: 1,
   pageSize: 25,
 };
+
+function typeKeyOf(w) {
+  return w.type || "(unspecified)";
+}
 
 function parseNumericFilter(expr) {
   expr = expr.trim();
@@ -684,14 +1019,13 @@ function getFilteredSorted() {
   const titleF = f.title.toLowerCase();
   const journalF = f.journal.toLowerCase();
   const authorsF = f.authors.toLowerCase();
-  const typeF = f.type.toLowerCase();
   const yearTest = parseNumericFilter(f.year);
   const citesTest = parseNumericFilter(f.citations);
 
   let rows = WORKS.filter(w => {
     if (titleF && !(w.title || "").toLowerCase().includes(titleF)) return false;
     if (journalF && !(w.journal || "").toLowerCase().includes(journalF)) return false;
-    if (typeF && !(w.type || "").toLowerCase().includes(typeF)) return false;
+    if (state.types && !state.types.has(typeKeyOf(w))) return false;
     if (authorsF && !w.authors.some(a => a.toLowerCase().includes(authorsF))) return false;
     if (!yearTest(w.year)) return false;
     if (!citesTest(w.citations)) return false;
@@ -781,12 +1115,158 @@ document.querySelectorAll("input[data-filter]").forEach(input => {
   });
 });
 
+// ---------- type filter dropdown ----------
+function initTypeFilter() {
+  const allTypes = [...new Set(WORKS.map(typeKeyOf))].sort();
+  state.types = new Set(allTypes);   // start with everything shown
+
+  const menu = document.getElementById("typeMenu");
+  const summary = document.getElementById("typeSummary");
+
+  function updateSummary() {
+    if (state.types.size === allTypes.length) {
+      summary.textContent = "All types";
+    } else if (state.types.size === 0) {
+      summary.textContent = "None";
+    } else if (state.types.size === 1) {
+      summary.textContent = [...state.types][0];
+    } else {
+      summary.textContent = `${state.types.size} of ${allTypes.length} types`;
+    }
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "type-actions";
+  const all = document.createElement("a"); all.textContent = "All";
+  const none = document.createElement("a"); none.textContent = "None";
+  actions.appendChild(all);
+  actions.appendChild(none);
+  menu.appendChild(actions);
+
+  const boxes = [];
+  allTypes.forEach(t => {
+    const count = WORKS.filter(w => typeKeyOf(w) === t).length;
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.value = t;
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.types.add(t); else state.types.delete(t);
+      updateSummary();
+      state.page = 1;
+      renderTable();
+    });
+    boxes.push(cb);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(`${t} (${count})`));
+    menu.appendChild(label);
+  });
+
+  function setAll(on) {
+    state.types = on ? new Set(allTypes) : new Set();
+    boxes.forEach(cb => { cb.checked = on; });
+    updateSummary();
+    state.page = 1;
+    renderTable();
+  }
+  all.addEventListener("click", () => setAll(true));
+  none.addEventListener("click", () => setAll(false));
+
+  // Dismiss the dropdown on an outside click or Escape (native <details> only
+  // closes when its own summary is clicked again).
+  const details = document.getElementById("typeFilter");
+  document.addEventListener("click", (e) => {
+    if (details.open && !details.contains(e.target)) details.open = false;
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") details.open = false;
+  });
+
+  updateSummary();
+}
+
 document.getElementById("prevPage").addEventListener("click", () => {
   if (state.page > 1) { state.page--; renderTable(); }
 });
 document.getElementById("nextPage").addEventListener("click", () => {
   state.page++; renderTable();
 });
+
+// ---------- constellation ----------
+function renderConstellation() {
+  const host = document.getElementById("constellation");
+  const W = host.clientWidth || 560;
+  const H = host.clientHeight || 280;
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  const nodes = CONSTELLATION.nodes;
+  const edges = CONSTELLATION.edges;
+  const maxC = Math.max(...nodes.map(n => n.citations), 1);
+  const px = n => 12 + n.x * (W - 24);
+  const py = n => 12 + n.y * (H - 24);
+  const rOf = c => 2.4 + Math.sqrt(c / maxC) * 15;
+
+  const mk = (tag, attrs) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  };
+
+  // faint background field stars (deterministic scatter)
+  let seed = 7;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let i = 0; i < 70; i++) {
+    svg.appendChild(mk("circle", { cx: rnd() * W, cy: rnd() * H, r: 0.4 + rnd() * 1.0,
+      fill: "#ffffff", opacity: (0.04 + rnd() * 0.16).toFixed(2) }));
+  }
+
+  // constellation lines (within communities)
+  edges.forEach(([a, b]) => {
+    const na = nodes[a], nb = nodes[b];
+    const col = na.comm >= 0 && na.comm === nb.comm ? na.color : "#8b93a7";
+    svg.appendChild(mk("line", { x1: px(na), y1: py(na), x2: px(nb), y2: py(nb),
+      stroke: col, "stroke-width": 0.6, opacity: 0.22 }));
+  });
+
+  // stars — draw faintest first so the most-cited papers sit on top
+  [...nodes].sort((a, b) => a.citations - b.citations).forEach(n => {
+    const r = rOf(n.citations);
+    const g = mk("g", { class: "star" });
+    // Glow halos are non-interactive so a bright star's halo doesn't steal
+    // hover/click from a neighbouring star underneath it — only the solid core
+    // is the hit target.
+    g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r * 1.9, fill: n.color, opacity: 0.08, "pointer-events": "none" }));
+    g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r * 1.25, fill: n.color, opacity: 0.18, "pointer-events": "none" }));
+    g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r, fill: n.color, stroke: "#0a0f1e", "stroke-width": 0.6 }));
+    if (r > 6) g.appendChild(mk("circle", { cx: px(n), cy: py(n), r: r * 0.4, fill: "#ffffff", opacity: 0.9, "pointer-events": "none" }));
+    const title = document.createElementNS(NS, "title");
+    title.textContent = `${n.title} — ${n.citations.toLocaleString()} citations · ${n.topic}`;
+    g.appendChild(title);
+    if (n.doi) g.addEventListener("click", () => window.open(n.doi, "_blank", "noopener"));
+    svg.appendChild(g);
+  });
+
+  // one topic label per named community, at its brightest star
+  CONSTELLATION.legend.forEach(lg => {
+    const anchor = nodes.find(n => n.isAnchor && n.color === lg.color);
+    if (!anchor) return;
+    const r = rOf(anchor.citations);
+    const right = anchor.x < 0.72;
+    const t = mk("text", {
+      x: right ? px(anchor) + r + 5 : px(anchor) - r - 5,
+      y: py(anchor) + 3.5, "font-size": 11, "font-weight": 600,
+      fill: lg.color, "text-anchor": right ? "start" : "end",
+    });
+    t.textContent = lg.short;
+    svg.appendChild(t);
+  });
+
+  host.innerHTML = "";
+  host.appendChild(svg);
+}
 
 // ---------- theme ----------
 document.getElementById("themeSelect").addEventListener("change", (e) => {
@@ -797,7 +1277,10 @@ document.getElementById("themeSelect").addEventListener("change", (e) => {
 // ---------- init ----------
 renderTiles();
 renderCharts();
+renderConstellation();
+initTypeFilter();
 renderTable();
+window.addEventListener("resize", renderConstellation);
 </script>
 
 </body>
